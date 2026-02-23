@@ -127,6 +127,101 @@ def test_ensure_thread_resume_passes_developer_instructions():
     assert captured[0][1]["developerInstructions"] == "use tools"
 
 
+def test_list_threads_parses_response_and_filters():
+    client = CodexAppServerClient(codex_cmd="codex")
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_start():
+        return None
+
+    async def fake_request(method, params, *, timeout_s=None):
+        del timeout_s
+        captured.append((method, params))
+        return {
+            "data": [
+                {
+                    "id": "thread-1",
+                    "cwd": "/tmp/work",
+                    "source": "cli",
+                    "updatedAt": 100,
+                    "createdAt": 90,
+                    "preview": "hello",
+                }
+            ],
+            "nextCursor": "cursor-1",
+        }
+
+    client.start = fake_start  # type: ignore[method-assign]
+    client._request = fake_request  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        client.list_threads(
+            limit=7,
+            cwd="/tmp/work",
+            source_kinds=["cli", "vscode"],
+            cursor="cursor-0",
+            archived=False,
+            sort_key="updated_at",
+        )
+    )
+
+    assert captured == [
+        (
+            "thread/list",
+            {
+                "limit": 7,
+                "cwd": "/tmp/work",
+                "sourceKinds": ["cli", "vscode"],
+                "cursor": "cursor-0",
+                "archived": False,
+                "sortKey": "updated_at",
+            },
+        )
+    ]
+    assert result.next_cursor == "cursor-1"
+    assert len(result.threads) == 1
+    thread = result.threads[0]
+    assert thread.thread_id == "thread-1"
+    assert thread.cwd == "/tmp/work"
+    assert thread.source == "cli"
+    assert thread.updated_at == 100
+    assert thread.created_at == 90
+    assert thread.preview == "hello"
+
+
+def test_list_threads_skips_invalid_entries():
+    client = CodexAppServerClient(codex_cmd="codex")
+
+    async def fake_request(method, params, *, timeout_s=None):
+        del method, params, timeout_s
+        return {
+            "data": [
+                None,
+                {},
+                {"id": ""},
+                {"id": "thread-2", "updatedAt": "bad", "cwd": 7, "source": True},
+            ],
+            "nextCursor": 123,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    result = asyncio.run(client.list_threads(limit=0))
+    assert result.next_cursor is None
+    assert [thread.thread_id for thread in result.threads] == ["thread-2"]
+    thread = result.threads[0]
+    assert thread.updated_at is None
+    assert thread.cwd is None
+    assert thread.source is None
+
+
+def test_list_threads_rejects_invalid_sort_key():
+    client = CodexAppServerClient(codex_cmd="codex")
+
+    with pytest.raises(ValueError):
+        asyncio.run(client.list_threads(sort_key="newest"))
+
+
 def test_interrupt_active_turn_returns_false_without_active_turn():
     client = CodexAppServerClient(codex_cmd="codex")
     assert asyncio.run(client.interrupt_active_turn()) is False

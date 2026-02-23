@@ -5,11 +5,15 @@ import json
 import logging
 import shlex
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
+
+# Some app-server JSON-RPC messages (notably large thread listings) can exceed the
+# default asyncio StreamReader 64 KiB line limit. Raise it to avoid reader crashes.
+APP_SERVER_STREAM_LIMIT = 4 * 1024 * 1024
 
 
 class CodexError(RuntimeError):
@@ -55,6 +59,22 @@ class CodexTurnResult:
     message: str | None
     error: str | None
     status: str
+
+
+@dataclass(slots=True)
+class CodexThreadSummary:
+    thread_id: str
+    cwd: str | None = None
+    source: str | None = None
+    updated_at: int | None = None
+    created_at: int | None = None
+    preview: str | None = None
+
+
+@dataclass(slots=True)
+class CodexThreadListResult:
+    threads: list[CodexThreadSummary]
+    next_cursor: str | None = None
 
 
 @dataclass
@@ -119,6 +139,7 @@ class CodexAppServerClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=APP_SERVER_STREAM_LIMIT,
             )
             if self._proc.stdin is None or self._proc.stdout is None:
                 raise CodexError("codex app-server failed to open stdio pipes")
@@ -287,6 +308,83 @@ class CodexAppServerClient:
                 if self._active_turn is active_turn:
                     self._active_turn = None
                 self._approval_handler = None
+
+    async def list_threads(
+        self,
+        *,
+        limit: int = 10,
+        cwd: str | None = None,
+        source_kinds: Sequence[str] | None = None,
+        cursor: str | None = None,
+        archived: bool | None = None,
+        sort_key: str | None = None,
+    ) -> CodexThreadListResult:
+        params: dict[str, Any] = {"limit": max(1, int(limit))}
+        if cwd is not None:
+            params["cwd"] = cwd
+        if source_kinds is not None:
+            params["sourceKinds"] = [kind for kind in source_kinds if isinstance(kind, str)]
+        if cursor is not None:
+            params["cursor"] = cursor
+        if archived is not None:
+            params["archived"] = archived
+        if sort_key is not None:
+            if sort_key not in {"created_at", "updated_at"}:
+                raise ValueError("sort_key must be 'created_at' or 'updated_at'")
+            params["sortKey"] = sort_key
+
+        response = await self._request("thread/list", params)
+        if not isinstance(response, dict):
+            raise CodexError("thread/list returned an invalid response")
+
+        data = response.get("data")
+        if not isinstance(data, list):
+            raise CodexError("thread/list response missing data list")
+
+        threads: list[CodexThreadSummary] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            thread_id = item.get("id")
+            if not isinstance(thread_id, str) or not thread_id:
+                continue
+
+            updated_at = item.get("updatedAt")
+            if not isinstance(updated_at, int):
+                updated_at = None
+
+            created_at = item.get("createdAt")
+            if not isinstance(created_at, int):
+                created_at = None
+
+            cwd_value = item.get("cwd")
+            if not isinstance(cwd_value, str) or not cwd_value:
+                cwd_value = None
+
+            source = item.get("source")
+            if not isinstance(source, str) or not source:
+                source = None
+
+            preview = item.get("preview")
+            if not isinstance(preview, str) or not preview:
+                preview = None
+
+            threads.append(
+                CodexThreadSummary(
+                    thread_id=thread_id,
+                    cwd=cwd_value,
+                    source=source,
+                    updated_at=updated_at,
+                    created_at=created_at,
+                    preview=preview,
+                )
+            )
+
+        next_cursor = response.get("nextCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            next_cursor = None
+
+        return CodexThreadListResult(threads=threads, next_cursor=next_cursor)
 
     def has_active_turn(self) -> bool:
         active = self._active_turn

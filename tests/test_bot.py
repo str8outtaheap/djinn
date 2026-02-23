@@ -9,7 +9,12 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 import bot
-from codex import CodexApprovalRequest, CodexProgressEvent
+from codex import (
+    CodexApprovalRequest,
+    CodexProgressEvent,
+    CodexThreadListResult,
+    CodexThreadSummary,
+)
 
 
 def _update(chat_id: int | None, user_id: int | None):
@@ -213,6 +218,7 @@ def test_build_help_text_mentions_cancel_and_proj():
     text = bot.build_help_text()
     assert "/cancel" in text
     assert "/proj <name>" in text
+    assert "/sessions use <n|thread_id>" in text
 
 
 def test_truncate_output_adds_notice_when_clipped():
@@ -511,3 +517,222 @@ def test_startup_notify_sends_online_message(monkeypatch):
     assert sent["chat_id"] == 123
     assert "Djinn online." in sent["text"]
     assert "project: api" in sent["text"]
+
+
+def test_resolve_session_selection_by_index():
+    state = bot.BotState(last_session_ids=["thread-a", "thread-b"])
+    thread_id, error_text = bot.resolve_session_selection(state, "2")
+    assert error_text is None
+    assert thread_id == "thread-b"
+
+
+def test_resolve_session_selection_rejects_missing_index():
+    state = bot.BotState(last_session_ids=["thread-a"])
+    thread_id, error_text = bot.resolve_session_selection(state, "3")
+    assert thread_id is None
+    assert error_text == "No session #3. Run /sessions first."
+
+
+def test_format_sessions_text_marks_current_thread():
+    sessions = [
+        CodexThreadSummary(
+            thread_id="01234567-0123-0123-0123-0123456789ab",
+            cwd="/tmp/work",
+            source="cli",
+            updated_at=100,
+        ),
+        CodexThreadSummary(
+            thread_id="thread-two",
+            cwd="/tmp/other",
+            source="vscode",
+            updated_at=200,
+        ),
+    ]
+    text = bot.format_sessions_text(
+        sessions,
+        scope_all=False,
+        workdir="/tmp/work",
+        current_thread_id="thread-two",
+    )
+    assert "Recent sessions (/tmp/work):" in text
+    assert "(current)" in text
+    assert "/sessions use <n>" in text
+
+
+def test_latest_sessions_by_workdir_keeps_first_entry_for_each_cwd():
+    sessions = [
+        CodexThreadSummary(thread_id="thread-1", cwd="/tmp/work"),
+        CodexThreadSummary(thread_id="thread-2", cwd="/tmp/work"),
+        CodexThreadSummary(thread_id="thread-3", cwd="/tmp/other"),
+    ]
+    deduped = bot.latest_sessions_by_workdir(sessions, max_sessions=10)
+    assert [session.thread_id for session in deduped] == ["thread-1", "thread-3"]
+
+
+def test_sessions_cmd_lists_newest_session_per_workdir_by_default(monkeypatch):
+    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+
+    state = bot.BotState(workdir="/tmp/work", thread_id="thread-2")
+    context = _context_with_state(state)
+    context.args = []
+    message, _ = _message(text="/sessions", message_id=90)
+    update = _update_with_message(chat_id=123, user_id=7, message=message)
+
+    called: dict[str, Any] = {}
+    sent: dict[str, Any] = {}
+
+    class FakeClient:
+        async def list_threads(self, **kwargs):
+            called.update(kwargs)
+            return CodexThreadListResult(
+                threads=[
+                    CodexThreadSummary(thread_id="thread-1", cwd="/tmp/work", source="cli"),
+                    CodexThreadSummary(thread_id="thread-2", cwd="/tmp/work", source="vscode"),
+                    CodexThreadSummary(thread_id="thread-3", cwd="/tmp/other", source="cli"),
+                ],
+                next_cursor=None,
+            )
+
+    async def fake_get_codex_client(_state: bot.BotState):
+        return FakeClient()
+
+    async def fake_send_message(_application, text: str, **kwargs):
+        sent["text"] = text
+        sent["reply_markup"] = kwargs.get("reply_markup")
+        return 1
+
+    monkeypatch.setattr(bot, "get_codex_client", fake_get_codex_client)
+    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    asyncio.run(bot.sessions_cmd(update, context))
+
+    assert called == {"limit": bot.SESSIONS_FETCH_LIMIT, "cwd": None, "sort_key": "updated_at"}
+    assert state.last_session_ids == ["thread-1", "thread-3"]
+    assert "Recent sessions (all workdirs):" in sent["text"]
+    assert "Showing newest session per workdir." in sent["text"]
+    assert sent["reply_markup"] is not None
+
+
+def test_sessions_cmd_here_lists_current_workdir_history(monkeypatch):
+    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+
+    state = bot.BotState(workdir="/tmp/work")
+    context = _context_with_state(state)
+    context.args = ["here"]
+    message, _ = _message(text="/sessions here", message_id=93)
+    update = _update_with_message(chat_id=123, user_id=7, message=message)
+
+    called: dict[str, Any] = {}
+    sent: dict[str, Any] = {}
+
+    class FakeClient:
+        async def list_threads(self, **kwargs):
+            called.update(kwargs)
+            return CodexThreadListResult(
+                threads=[
+                    CodexThreadSummary(thread_id="thread-1", cwd="/tmp/work", source="cli"),
+                    CodexThreadSummary(thread_id="thread-2", cwd="/tmp/work", source="vscode"),
+                ],
+                next_cursor="cursor-1",
+            )
+
+    async def fake_get_codex_client(_state: bot.BotState):
+        return FakeClient()
+
+    async def fake_send_message(_application, text: str, **kwargs):
+        sent["text"] = text
+        sent["reply_markup"] = kwargs.get("reply_markup")
+        return 1
+
+    monkeypatch.setattr(bot, "get_codex_client", fake_get_codex_client)
+    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    asyncio.run(bot.sessions_cmd(update, context))
+
+    assert called == {
+        "limit": bot.SESSIONS_LIST_LIMIT,
+        "cwd": "/tmp/work",
+        "sort_key": "updated_at",
+    }
+    assert state.last_session_ids == ["thread-1", "thread-2"]
+    assert "Recent sessions (/tmp/work):" in sent["text"]
+    assert "Use `/sessions` to browse newest sessions across workdirs." in sent["text"]
+    assert sent["reply_markup"] is not None
+
+
+def test_sessions_cmd_use_index_updates_thread(monkeypatch):
+    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+
+    state = bot.BotState(thread_id="old", last_session_ids=["thread-a", "thread-b"])
+    context = _context_with_state(state)
+    context.args = ["use", "2"]
+    message, replies = _message(text="/sessions use 2", message_id=91)
+    update = _update_with_message(chat_id=123, user_id=7, message=message)
+
+    saved: list[str] = []
+
+    def fake_persist_state(s: bot.BotState):
+        saved.append(s.thread_id or "")
+
+    monkeypatch.setattr(bot, "persist_state", fake_persist_state)
+    asyncio.run(bot.sessions_cmd(update, context))
+
+    assert state.thread_id == "thread-b"
+    assert saved == ["thread-b"]
+    assert replies == ["Session set: thread-b"]
+
+
+def test_sessions_callback_sets_thread(monkeypatch):
+    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    state = bot.BotState(thread_id="old")
+    context = _context_with_state(state)
+
+    answers: list[str] = []
+
+    async def answer(text: str, show_alert: bool = False):
+        del show_alert
+        answers.append(text)
+
+    async def edit_message_reply_markup(reply_markup=None):
+        del reply_markup
+        return None
+
+    callback_message = SimpleNamespace(
+        chat=SimpleNamespace(id=123),
+        message_id=92,
+    )
+    query = SimpleNamespace(
+        data="sessions:thread-c",
+        answer=answer,
+        edit_message_reply_markup=edit_message_reply_markup,
+        message=callback_message,
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_chat=SimpleNamespace(id=123),
+        effective_user=SimpleNamespace(id=7),
+    )
+
+    sent: dict[str, Any] = {}
+
+    async def fake_send_message(_application, text: str, **kwargs):
+        sent["text"] = text
+        sent["chat_id"] = kwargs.get("chat_id")
+        return 1
+
+    saved: list[str] = []
+
+    def fake_persist_state(s: bot.BotState):
+        saved.append(s.thread_id or "")
+
+    monkeypatch.setattr(bot, "persist_state", fake_persist_state)
+    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    asyncio.run(bot.sessions_callback(cast(Any, update), context))
+
+    assert answers == ["Session selected"]
+    assert state.thread_id == "thread-c"
+    assert saved == ["thread-c"]
+    assert sent["text"] == "Session set: thread-c"
+    assert sent["chat_id"] == 123

@@ -8,7 +8,8 @@ Telegram bot bridge for the [Codex CLI](https://developers.openai.com/codex/cli)
 - Live progress updates from structured item lifecycle events (`started`, `delta`, `completed`)
 - Telegram approval buttons for command/file-change approvals
 - Startup health ping ("Djinn online") to the authorized chat
-- `/cd`, `/pwd`, `/status`, `/reset`, `/thread`, `/pin`, `/unpin`, `/run`, `/proj`
+- Session browser and quick resume (`/sessions`, `/sessions here`, `/sessions use`)
+- `/cd`, `/status`, `/reset`, `/pin`, `/unpin`, `/run`, `/proj`
 - Optional voice note transcription via OpenAI SDK
 
 ## Quickstart
@@ -57,6 +58,9 @@ network_access = true
 - `/proj <name>`: switch to a saved project context (workdir + thread + pin)
 - `/proj <name> <path>`: save (and switch to) a project context
 - `/proj rm <name>`: remove a project alias
+- `/sessions`: list the newest session per workdir
+- `/sessions here`: list recent sessions for the current workdir
+- `/sessions use <n|thread_id>`: switch to a listed session or explicit thread id
 - `/pin <text>`: set a short context note shown during runs
 - `/pin`: show current pin
 - `/unpin`: clear the pin

@@ -31,6 +31,7 @@ from codex import (
     CodexApprovalRequest,
     CodexAppServerClient,
     CodexProgressEvent,
+    CodexThreadSummary,
     CodexTurnResult,
 )
 
@@ -102,6 +103,12 @@ RUN_COMMAND_TIMEOUT_S = 30.0
 RUN_OUTPUT_MAX_CHARS = 8_000
 # Keep final "changed files" recap short enough for quick mobile scanning.
 RESULT_MAX_CHANGED_FILES = 8
+# Number of session rows shown in `/sessions` results.
+SESSIONS_LIST_LIMIT = 20
+# Fetch more than we display so newest-per-workdir dedupe still has enough candidates.
+SESSIONS_FETCH_LIMIT = 50
+# Keep inline session picker compact to avoid oversized callback keyboards.
+SESSIONS_BUTTON_LIMIT = 6
 
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".djinn")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -158,6 +165,7 @@ class BotState:
     active_shell_proc: asyncio.subprocess.Process | None = None
     shell_cancel_requested: bool = False
     queued_turn: QueuedTurn | None = None
+    last_session_ids: list[str] = field(default_factory=list)
     last_turn_result: str | None = None
     codex: CodexAppServerClient | None = None
     pending_approvals: dict[str, PendingApproval] = field(default_factory=dict)
@@ -445,6 +453,113 @@ def truncate_output(text: str, *, max_chars: int, label: str) -> str:
     return f"{clipped}\n... ({label} truncated to {max_chars} chars)"
 
 
+def _short_thread_id(thread_id: str) -> str:
+    if len(thread_id) <= 16:
+        return thread_id
+    return f"{thread_id[:8]}...{thread_id[-6:]}"
+
+
+def _session_age_label(updated_at: int | None) -> str:
+    if updated_at is None:
+        return "unknown"
+    now = int(time.time())
+    delta = max(0, now - updated_at)
+    return format_elapsed(delta)
+
+
+def latest_sessions_by_workdir(
+    sessions: Sequence[CodexThreadSummary],
+    *,
+    max_sessions: int,
+) -> list[CodexThreadSummary]:
+    deduped: list[CodexThreadSummary] = []
+    seen_workdirs: set[str] = set()
+
+    for session in sessions:
+        key = session.cwd or ""
+        if key in seen_workdirs:
+            continue
+        seen_workdirs.add(key)
+        deduped.append(session)
+        if len(deduped) >= max_sessions:
+            break
+
+    return deduped
+
+
+def format_sessions_text(
+    sessions: Sequence[CodexThreadSummary],
+    *,
+    scope_all: bool,
+    workdir: str,
+    current_thread_id: str | None,
+    next_cursor: str | None = None,
+    latest_per_workdir: bool = False,
+) -> str:
+    heading = "Recent sessions (all workdirs):" if scope_all else f"Recent sessions ({workdir}):"
+    lines = [heading]
+    if latest_per_workdir:
+        lines.append("Showing newest session per workdir.")
+    if not sessions:
+        lines.append("(none found)")
+    else:
+        for index, session in enumerate(sessions, start=1):
+            current = " (current)" if current_thread_id == session.thread_id else ""
+            source = session.source or "unknown"
+            cwd = session.cwd or "unknown"
+            lines.append(
+                f"{index}. `{sanitize_code(_short_thread_id(session.thread_id))}`"
+                f" [{source}] {_session_age_label(session.updated_at)}"
+                f"\n   `{sanitize_code(cwd)}`{current}"
+            )
+
+    lines.append("")
+    lines.append("Use `/sessions use <n>` or `/sessions use <thread_id>` to switch.")
+    if not scope_all:
+        lines.append("Use `/sessions` to browse newest sessions across workdirs.")
+    else:
+        lines.append("Use `/sessions here` to list more sessions for the current workdir.")
+    if next_cursor and not latest_per_workdir:
+        lines.append("More sessions exist; run `/sessions here` again to continue browsing.")
+    return "\n".join(lines)
+
+
+def resolve_session_selection(state: BotState, token: str) -> tuple[str | None, str | None]:
+    target = token.strip()
+    if not target:
+        return None, "Usage: /sessions use <n|thread_id>"
+
+    if target.isdigit():
+        index = int(target)
+        if index < 1 or index > len(state.last_session_ids):
+            return None, f"No session #{index}. Run /sessions first."
+        return state.last_session_ids[index - 1], None
+
+    return target, None
+
+
+def _sessions_keyboard(sessions: Sequence[CodexThreadSummary]) -> InlineKeyboardMarkup | None:
+    if not sessions:
+        return None
+
+    buttons: list[InlineKeyboardButton] = []
+    for index, session in enumerate(sessions[:SESSIONS_BUTTON_LIMIT], start=1):
+        buttons.append(
+            InlineKeyboardButton(
+                f"Use {index}",
+                callback_data=f"sessions:{session.thread_id}",
+            )
+        )
+
+    if not buttons:
+        return None
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(buttons), 3):
+        rows.append(buttons[i : i + 3])
+    return InlineKeyboardMarkup(rows)
+
+
 def build_help_text() -> str:
     lines = [
         "Djinn commands:",
@@ -459,6 +574,9 @@ def build_help_text() -> str:
         "/proj <name> - switch to saved project context",
         "/proj <name> <path> - create/update and switch project context",
         "/proj rm <name> - remove a project context",
+        "/sessions - list newest session per workdir",
+        "/sessions here - list recent sessions for this workdir",
+        "/sessions use <n|thread_id> - switch current session",
         "/pin <text> - set pinned context",
         "/pin - show current pin",
         "/unpin - clear pin",
@@ -1119,6 +1237,87 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("\n".join(lines))
 
 
+async def sessions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_authorized(update):
+        return
+    if update.message is None or update.effective_chat is None:
+        return
+
+    state: BotState = context.application.bot_data["state"]
+    args = context.args
+
+    if args and args[0] == "use":
+        target = join_command_args(args[1:])
+        thread_id, error_text = resolve_session_selection(state, target)
+        if error_text:
+            await update.message.reply_text(error_text)
+            return
+        assert thread_id is not None
+        state.thread_id = thread_id
+        persist_state(state)
+        await update.message.reply_text(f"Session set: {state.thread_id}")
+        return
+
+    scope_all = True
+    if args:
+        if args[0] == "here":
+            scope_all = False
+        elif args[0] != "all":
+            await update.message.reply_text(
+                "Usage: /sessions | /sessions here | /sessions use <n|thread_id>"
+            )
+            return
+        if len(args) > 1:
+            await update.message.reply_text(
+                "Usage: /sessions | /sessions here | /sessions use <n|thread_id>"
+            )
+            return
+
+    try:
+        client = await get_codex_client(state)
+        if scope_all:
+            listing = await client.list_threads(
+                limit=SESSIONS_FETCH_LIMIT,
+                cwd=None,
+                sort_key="updated_at",
+            )
+            sessions = latest_sessions_by_workdir(
+                listing.threads,
+                max_sessions=SESSIONS_LIST_LIMIT,
+            )
+            next_cursor = listing.next_cursor
+            latest_per_workdir = True
+        else:
+            listing = await client.list_threads(
+                limit=SESSIONS_LIST_LIMIT,
+                cwd=state.workdir,
+                sort_key="updated_at",
+            )
+            sessions = list(listing.threads)
+            next_cursor = listing.next_cursor
+            latest_per_workdir = False
+    except Exception as exc:
+        LOGGER.warning("failed to list sessions: %s", exc)
+        await update.message.reply_text(f"Failed to list sessions: {exc}")
+        return
+
+    state.last_session_ids = [session.thread_id for session in sessions]
+    await send_message(
+        context.application,
+        format_sessions_text(
+            sessions,
+            scope_all=scope_all,
+            workdir=state.workdir,
+            current_thread_id=state.thread_id,
+            next_cursor=next_cursor,
+            latest_per_workdir=latest_per_workdir,
+        ),
+        chat_id=int(update.effective_chat.id),
+        reply_to_message_id=update.message.message_id,
+        reply_markup=_sessions_keyboard(sessions),
+    )
+
+
 async def proj_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update):
         return
@@ -1374,6 +1573,49 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_reply_markup(reply_markup=None)
     except BadRequest:
         LOGGER.debug("approval message already updated")
+
+
+async def sessions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+
+    if not is_authorized(update):
+        await query.answer("Not authorized", show_alert=True)
+        return
+
+    data = query.data or ""
+    parts = data.split(":", 1)
+    if len(parts) != 2 or parts[0] != "sessions":
+        await query.answer("Invalid session payload", show_alert=True)
+        return
+
+    thread_id = parts[1].strip()
+    if not thread_id:
+        await query.answer("Missing thread id", show_alert=True)
+        return
+
+    state: BotState = context.application.bot_data["state"]
+    state.thread_id = thread_id
+    persist_state(state)
+
+    await query.answer("Session selected")
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except BadRequest:
+        LOGGER.debug("session message already updated")
+
+    message = query.message
+    if message is not None:
+        chat = message.chat
+        if chat is not None:
+            await send_message(
+                context.application,
+                f"Session set: {thread_id}",
+                chat_id=int(chat.id),
+                reply_to_message_id=message.message_id,
+                prefer_markdown=False,
+            )
 
 
 async def extract_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -1718,11 +1960,13 @@ def main() -> None:
     application.add_handler(CommandHandler("cd", cd_cmd))
     application.add_handler(CommandHandler("thread", thread_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
+    application.add_handler(CommandHandler("sessions", sessions_cmd))
     application.add_handler(CommandHandler("proj", proj_cmd))
     application.add_handler(CommandHandler("pin", pin_cmd))
     application.add_handler(CommandHandler("unpin", unpin_cmd))
     application.add_handler(CommandHandler("run", run_cmd))
     application.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^approval:"))
+    application.add_handler(CallbackQueryHandler(sessions_callback, pattern=r"^sessions:"))
     application.add_handler(
         MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_message)
     )
