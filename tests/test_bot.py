@@ -9,6 +9,8 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 import bot
+import commands
+import state as bot_state
 from codex import (
     CodexProgressEvent,
     CodexThreadListResult,
@@ -72,19 +74,21 @@ def test_resolve_workdir_absolute(tmp_path):
 
 
 def test_load_projects_migrates_legacy_format(tmp_path, monkeypatch):
+    project_dir = tmp_path / "api"
+    project_dir.mkdir()
     projects_path = tmp_path / "projects.json"
-    projects_path.write_text('{"api":"/tmp/api"}', encoding="utf-8")
-    monkeypatch.setattr(bot, "PROJECTS_PATH", str(projects_path))
+    projects_path.write_text(json.dumps({"api": str(project_dir)}), encoding="utf-8")
+    monkeypatch.setattr(bot_state, "PROJECTS_PATH", str(projects_path))
 
     projects = bot.load_projects()
 
     assert "api" in projects
-    assert projects["api"].path == "/tmp/api"
+    assert projects["api"].path == str(project_dir)
     assert projects["api"].thread_id is None
     assert projects["api"].pin is None
 
     payload = json.loads(projects_path.read_text(encoding="utf-8"))
-    assert payload["api"] == {"path": "/tmp/api", "thread_id": None, "pin": None}
+    assert payload["api"] == {"path": str(project_dir), "thread_id": None, "pin": None}
 
 
 def test_restore_project_state_restores_workdir_thread_and_pin(tmp_path):
@@ -175,8 +179,8 @@ def test_project_switch_round_trip_preserves_each_context(tmp_path):
 
 
 def test_persist_state_saves_active_project_runtime(tmp_path, monkeypatch):
-    monkeypatch.setattr(bot, "STATE_PATH", str(tmp_path / "state.json"))
-    monkeypatch.setattr(bot, "PROJECTS_PATH", str(tmp_path / "projects.json"))
+    monkeypatch.setattr(bot_state, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(bot_state, "PROJECTS_PATH", str(tmp_path / "projects.json"))
     project_dir = tmp_path / "api"
     project_dir.mkdir()
 
@@ -259,16 +263,16 @@ def test_format_changed_files_summary_limits_output():
 
 
 def test_is_authorized_chat_only(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
 
     assert bot.is_authorized(_update(chat_id=123, user_id=1))
     assert not bot.is_authorized(_update(chat_id=999, user_id=1))
 
 
 def test_is_authorized_chat_and_user(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", "77")
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", "77")
 
     assert bot.is_authorized(_update(chat_id=123, user_id=77))
     assert not bot.is_authorized(_update(chat_id=123, user_id=88))
@@ -301,7 +305,7 @@ def test_note_progress_event_ignores_agent_messages():
 
 
 def test_render_progress_limits_actions(monkeypatch):
-    monkeypatch.setattr(bot, "PROGRESS_MAX_ACTIONS", 2)
+    monkeypatch.setattr(commands, "PROGRESS_MAX_ACTIONS", 2)
     progress = bot.ProgressState(started_at=0.0)
 
     for i in range(4):
@@ -353,8 +357,8 @@ def test_send_message_markdown_fallback():
 
 
 def test_on_message_busy_replaces_one_deep_queue(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
     state = bot.BotState()
     context = _context_with_state(state)
     sent: list[str] = []
@@ -363,7 +367,7 @@ def test_on_message_busy_replaces_one_deep_queue(monkeypatch):
         sent.append(text)
         return None
 
-    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
 
     async def run_case() -> None:
         await state.run_lock.acquire()
@@ -388,8 +392,8 @@ def test_on_message_busy_replaces_one_deep_queue(monkeypatch):
 
 
 def test_last_cmd_resends_saved_result(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
     state = bot.BotState(last_turn_result="done text")
     context = _context_with_state(state)
     message, _ = _message(text="/last", message_id=55)
@@ -402,7 +406,7 @@ def test_last_cmd_resends_saved_result(monkeypatch):
         sent["reply_to_message_id"] = kwargs.get("reply_to_message_id")
         return 77
 
-    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
     asyncio.run(bot.last_cmd(update, context))
 
     assert sent == {
@@ -413,8 +417,8 @@ def test_last_cmd_resends_saved_result(monkeypatch):
 
 
 def test_last_cmd_reports_missing_result(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
     state = bot.BotState(last_turn_result=None)
     context = _context_with_state(state)
     message, replies = _message(text="/last", message_id=56)
@@ -446,7 +450,7 @@ def test_drain_queued_turns_processes_new_items_until_empty(monkeypatch):
                 reply_to_message_id=reply_to_message_id,
             )
 
-    monkeypatch.setattr(bot, "run_turn_for_input", fake_run_turn_for_input)
+    monkeypatch.setattr(commands, "run_turn_for_input", fake_run_turn_for_input)
     state.queued_turn = bot.QueuedTurn(user_text="first", chat_id=1, reply_to_message_id=2)
 
     asyncio.run(bot.drain_queued_turns(context, state))
@@ -456,7 +460,7 @@ def test_drain_queued_turns_processes_new_items_until_empty(monkeypatch):
 
 
 def test_startup_notify_sends_online_message(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
     state = bot.BotState(workdir="/tmp/project", active_project="api")
     app = SimpleNamespace(bot_data={"state": state})
     sent: dict[str, Any] = {}
@@ -466,7 +470,7 @@ def test_startup_notify_sends_online_message(monkeypatch):
         sent["chat_id"] = kwargs.get("chat_id")
         return None
 
-    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
     asyncio.run(bot.startup_notify(cast(Any, app)))
 
     assert sent["chat_id"] == 123
@@ -525,8 +529,8 @@ def test_latest_sessions_by_workdir_keeps_first_entry_for_each_cwd():
 
 
 def test_sessions_cmd_lists_newest_session_per_workdir_by_default(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
 
     state = bot.BotState(workdir="/tmp/work", thread_id="thread-2")
     context = _context_with_state(state)
@@ -557,8 +561,8 @@ def test_sessions_cmd_lists_newest_session_per_workdir_by_default(monkeypatch):
         sent["reply_markup"] = kwargs.get("reply_markup")
         return 1
 
-    monkeypatch.setattr(bot, "get_codex_client", fake_get_codex_client)
-    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
     asyncio.run(bot.sessions_cmd(update, context))
 
     assert called == {"limit": bot.SESSIONS_FETCH_LIMIT, "cwd": None, "sort_key": "updated_at"}
@@ -569,8 +573,8 @@ def test_sessions_cmd_lists_newest_session_per_workdir_by_default(monkeypatch):
 
 
 def test_sessions_cmd_here_lists_current_workdir_history(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
 
     state = bot.BotState(workdir="/tmp/work")
     context = _context_with_state(state)
@@ -600,8 +604,8 @@ def test_sessions_cmd_here_lists_current_workdir_history(monkeypatch):
         sent["reply_markup"] = kwargs.get("reply_markup")
         return 1
 
-    monkeypatch.setattr(bot, "get_codex_client", fake_get_codex_client)
-    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
     asyncio.run(bot.sessions_cmd(update, context))
 
     assert called == {
@@ -616,8 +620,8 @@ def test_sessions_cmd_here_lists_current_workdir_history(monkeypatch):
 
 
 def test_sessions_cmd_use_index_updates_thread(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
 
     state = bot.BotState(thread_id="old", last_session_ids=["thread-a", "thread-b"])
     context = _context_with_state(state)
@@ -630,7 +634,7 @@ def test_sessions_cmd_use_index_updates_thread(monkeypatch):
     def fake_persist_state(s: bot.BotState):
         saved.append(s.thread_id or "")
 
-    monkeypatch.setattr(bot, "persist_state", fake_persist_state)
+    monkeypatch.setattr(commands, "persist_state", fake_persist_state)
     asyncio.run(bot.sessions_cmd(update, context))
 
     assert state.thread_id == "thread-b"
@@ -639,8 +643,8 @@ def test_sessions_cmd_use_index_updates_thread(monkeypatch):
 
 
 def test_sessions_callback_sets_thread(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
     state = bot.BotState(thread_id="old")
     context = _context_with_state(state)
 
@@ -682,8 +686,8 @@ def test_sessions_callback_sets_thread(monkeypatch):
     def fake_persist_state(s: bot.BotState):
         saved.append(s.thread_id or "")
 
-    monkeypatch.setattr(bot, "persist_state", fake_persist_state)
-    monkeypatch.setattr(bot, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "persist_state", fake_persist_state)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
     asyncio.run(bot.sessions_callback(cast(Any, update), context))
 
     assert answers == ["Session selected"]
