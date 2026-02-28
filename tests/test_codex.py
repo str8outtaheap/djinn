@@ -84,7 +84,6 @@ def test_ensure_thread_start_passes_developer_instructions():
         client.ensure_thread(
             thread_id=None,
             cwd="/tmp",
-            approval_policy="on-request",
             developer_instructions="be concise",
         )
     )
@@ -93,6 +92,7 @@ def test_ensure_thread_start_passes_developer_instructions():
     assert cwd == "/tmp"
     assert len(captured) == 1
     assert captured[0][0] == "thread/start"
+    assert captured[0][1]["approvalPolicy"] == "never"
     assert captured[0][1]["developerInstructions"] == "be concise"
 
 
@@ -115,7 +115,6 @@ def test_ensure_thread_resume_passes_developer_instructions():
         client.ensure_thread(
             thread_id="thread-2",
             cwd="/workspace",
-            approval_policy="on-request",
             developer_instructions="use tools",
         )
     )
@@ -124,6 +123,7 @@ def test_ensure_thread_resume_passes_developer_instructions():
     assert cwd == "/workspace"
     assert len(captured) == 1
     assert captured[0][0] == "thread/resume"
+    assert captured[0][1]["approvalPolicy"] == "never"
     assert captured[0][1]["developerInstructions"] == "use tools"
 
 

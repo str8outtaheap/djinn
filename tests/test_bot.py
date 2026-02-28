@@ -10,7 +10,6 @@ from telegram.error import BadRequest
 
 import bot
 from codex import (
-    CodexApprovalRequest,
     CodexProgressEvent,
     CodexThreadListResult,
     CodexThreadSummary,
@@ -219,6 +218,8 @@ def test_build_help_text_mentions_cancel_and_proj():
     assert "/cancel" in text
     assert "/proj <name>" in text
     assert "/sessions use <n|thread_id>" in text
+    assert "/approve" not in text
+    assert "/deny" not in text
 
 
 def test_truncate_output_adds_notice_when_clipped():
@@ -384,52 +385,6 @@ def test_on_message_busy_replaces_one_deep_queue(monkeypatch):
         "Djinn is busy. Queued your message and will run it next.",
         "Djinn is busy. Replaced the queued message with your latest one.",
     ]
-
-
-def test_approve_cmd_uses_latest_pending_request(monkeypatch):
-    monkeypatch.setattr(bot, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(bot, "TELEGRAM_USER_ID", None)
-
-    state = bot.BotState()
-    context = _context_with_state(state)
-    message, replies = _message(text="/approve", message_id=20)
-    update = _update_with_message(chat_id=123, user_id=7, message=message)
-
-    async def run_case() -> tuple[bool, str]:
-        loop = asyncio.get_running_loop()
-        old_future: asyncio.Future[str] = loop.create_future()
-        latest_future: asyncio.Future[str] = loop.create_future()
-        state.pending_approvals["old"] = bot.PendingApproval(
-            request=CodexApprovalRequest(
-                request_id="old",
-                kind="command",
-                thread_id="t1",
-                turn_id="u1",
-                item_id="i1",
-            ),
-            future=old_future,
-            message_id=100,
-            chat_id=123,
-        )
-        state.pending_approvals["latest"] = bot.PendingApproval(
-            request=CodexApprovalRequest(
-                request_id="latest",
-                kind="command",
-                thread_id="t2",
-                turn_id="u2",
-                item_id="i2",
-            ),
-            future=latest_future,
-            message_id=101,
-            chat_id=123,
-        )
-        await bot.approve_cmd(update, context)
-        return old_future.done(), latest_future.result()
-
-    old_done, latest_result = asyncio.run(run_case())
-    assert old_done is False
-    assert latest_result == bot.APPROVAL_ACCEPT
-    assert replies == ["Approved latest request."]
 
 
 def test_last_cmd_resends_saved_result(monkeypatch):

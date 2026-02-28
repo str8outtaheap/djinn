@@ -28,7 +28,6 @@ from telegram.ext import (
 )
 
 from codex import (
-    CodexApprovalRequest,
     CodexAppServerClient,
     CodexProgressEvent,
     CodexThreadSummary,
@@ -55,7 +54,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID")
 
 CODEX_CMD = os.getenv("CODEX_CMD", "codex")
-CODEX_APPROVAL_POLICY = os.getenv("CODEX_APPROVAL_POLICY", "on-request")
 
 
 def resolve_default_workdir() -> str:
@@ -121,18 +119,6 @@ SYSTEM_HINT = (
     "You have filesystem access and can run commands when needed."
 )
 
-APPROVAL_ACCEPT = "accept"
-APPROVAL_DECLINE = "decline"
-
-
-@dataclass
-class PendingApproval:
-    request: CodexApprovalRequest
-    future: asyncio.Future[str]
-    message_id: int | None
-    chat_id: int
-
-
 @dataclass
 class QueuedTurn:
     user_text: str
@@ -168,7 +154,6 @@ class BotState:
     last_session_ids: list[str] = field(default_factory=list)
     last_turn_result: str | None = None
     codex: CodexAppServerClient | None = None
-    pending_approvals: dict[str, PendingApproval] = field(default_factory=dict)
 
 
 # Generic persistence
@@ -567,8 +552,6 @@ def build_help_text() -> str:
         "/help - show this help",
         "/cancel - stop the active run/turn",
         "/last - resend the latest turn result",
-        "/approve - approve most recent pending action",
-        "/deny - deny most recent pending action",
         "/status - show active project, workdir, thread, pin",
         "/proj - list project contexts",
         "/proj <name> - switch to saved project context",
@@ -597,13 +580,6 @@ async def terminate_process(proc: asyncio.subprocess.Process, *, grace_s: float 
     except TimeoutError:
         proc.kill()
         await proc.wait()
-
-
-def latest_pending_approval(state: BotState) -> PendingApproval | None:
-    if not state.pending_approvals:
-        return None
-    latest_key = next(reversed(state.pending_approvals))
-    return state.pending_approvals.get(latest_key)
 
 
 def render_progress(progress: ProgressState, *, label: str, pin: str | None = None) -> str:
@@ -905,41 +881,6 @@ def build_prompt(user_text: str, pin: str | None = None) -> str:
     return f"Pinned context: {pin}\n\nUser: {user_text}"
 
 
-# Codex helpers
-
-def _approval_key(request: CodexApprovalRequest) -> str:
-    return str(request.request_id)
-
-
-def format_approval_text(request: CodexApprovalRequest) -> str:
-    lines = ["Djinn needs approval."]
-    if request.kind == "command":
-        lines.append("Type: command execution")
-        if request.command:
-            lines.append(f"Command: `{sanitize_code(request.command)}`")
-    elif request.kind == "file_change":
-        lines.append("Type: file change")
-
-    if request.cwd:
-        lines.append(f"CWD: `{sanitize_code(request.cwd)}`")
-    if request.reason:
-        lines.append(f"Reason: {request.reason}")
-
-    lines.append("Allow this action?")
-    return "\n".join(lines)
-
-
-def _approval_keyboard(key: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Allow", callback_data=f"approval:{key}:a"),
-                InlineKeyboardButton("Deny", callback_data=f"approval:{key}:d"),
-            ]
-        ]
-    )
-
-
 async def get_codex_client(state: BotState) -> CodexAppServerClient:
     if state.codex is None:
         state.codex = CodexAppServerClient(
@@ -949,54 +890,6 @@ async def get_codex_client(state: BotState) -> CodexAppServerClient:
         )
     await state.codex.start()
     return state.codex
-
-
-async def request_approval(
-    *,
-    context: ContextTypes.DEFAULT_TYPE,
-    state: BotState,
-    request: CodexApprovalRequest,
-    chat_id: int,
-    reply_to_message_id: int | None,
-) -> str:
-    key = _approval_key(request)
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[str] = loop.create_future()
-
-    text = format_approval_text(request)
-    message_id = await send_message(
-        context.application,
-        text,
-        chat_id=chat_id,
-        reply_to_message_id=reply_to_message_id,
-        reply_markup=_approval_keyboard(key),
-        disable_notification=True,
-    )
-
-    state.pending_approvals[key] = PendingApproval(
-        request=request,
-        future=future,
-        message_id=message_id,
-        chat_id=chat_id,
-    )
-
-    try:
-        decision = await future
-    finally:
-        state.pending_approvals.pop(key, None)
-
-    if message_id is not None:
-        status = "approved" if decision == APPROVAL_ACCEPT else "denied"
-        await edit_message(
-            context.application,
-            chat_id=chat_id,
-            message_id=message_id,
-            text=f"{text}\n\nDecision: {status}",
-            reply_markup=None,
-            prefer_markdown=False,
-        )
-
-    return decision
 
 
 async def progress_loop(
@@ -1104,42 +997,6 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("No active run to cancel.")
 
 
-async def _resolve_latest_approval(
-    *,
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    decision: str,
-) -> None:
-    if not is_authorized(update):
-        return
-    if update.message is None:
-        return
-
-    state: BotState = context.application.bot_data["state"]
-    pending = latest_pending_approval(state)
-    if pending is None:
-        await update.message.reply_text("No pending approvals.")
-        return
-
-    if pending.future.done():
-        await update.message.reply_text("Latest approval request is no longer active.")
-        return
-
-    pending.future.set_result(decision)
-    if decision == APPROVAL_ACCEPT:
-        await update.message.reply_text("Approved latest request.")
-    else:
-        await update.message.reply_text("Denied latest request.")
-
-
-async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _resolve_latest_approval(update=update, context=context, decision=APPROVAL_ACCEPT)
-
-
-async def deny_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _resolve_latest_approval(update=update, context=context, decision=APPROVAL_DECLINE)
-
-
 async def last_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update):
         return
@@ -1232,7 +1089,6 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"- thread: {state.thread_id or 'none'}",
         f"- pin: {state.pin or '(empty)'}",
     ]
-    lines.append(f"- approvals_pending: {len(state.pending_approvals)}")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -1540,41 +1396,6 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await drain_queued_turns(context, state)
 
 
-async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None:
-        return
-
-    if not is_authorized(update):
-        await query.answer("Not authorized", show_alert=True)
-        return
-
-    data = query.data or ""
-    parts = data.split(":", 2)
-    if len(parts) != 3 or parts[0] != "approval":
-        await query.answer("Invalid approval payload", show_alert=True)
-        return
-
-    key = parts[1]
-    decision_token = parts[2]
-    decision = APPROVAL_ACCEPT if decision_token == "a" else APPROVAL_DECLINE
-
-    state: BotState = context.application.bot_data["state"]
-    pending = state.pending_approvals.get(key)
-    if pending is None:
-        await query.answer("Approval request is no longer active", show_alert=True)
-        return
-
-    if not pending.future.done():
-        pending.future.set_result(decision)
-
-    await query.answer("Approved" if decision == APPROVAL_ACCEPT else "Denied")
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except BadRequest:
-        LOGGER.debug("approval message already updated")
-
-
 async def sessions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
@@ -1726,24 +1547,13 @@ async def run_turn_for_input(
         except asyncio.QueueFull:
             LOGGER.warning("progress queue full; dropping event %s", event.item_id)
 
-    async def on_approval(request: CodexApprovalRequest) -> str:
-        return await request_approval(
-            context=context,
-            state=state,
-            request=request,
-            chat_id=chat_id,
-            reply_to_message_id=reply_to_message_id,
-        )
-
     try:
         result = await client.run_turn(
             prompt=prompt,
             thread_id=state.thread_id,
             cwd=state.workdir,
-            approval_policy=CODEX_APPROVAL_POLICY,
             developer_instructions=SYSTEM_HINT,
             on_progress=on_progress if progress_queue is not None else None,
-            on_approval=on_approval,
         )
     except Exception as exc:
         LOGGER.exception("turn failed: %s", exc)
@@ -1943,6 +1753,7 @@ def main() -> None:
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(8)
         .post_init(startup_notify)
         .post_shutdown(shutdown)
         .build()
@@ -1953,8 +1764,6 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("cancel", cancel_cmd))
     application.add_handler(CommandHandler("last", last_cmd))
-    application.add_handler(CommandHandler("approve", approve_cmd))
-    application.add_handler(CommandHandler("deny", deny_cmd))
     application.add_handler(CommandHandler("reset", reset_cmd))
     application.add_handler(CommandHandler("pwd", pwd_cmd))
     application.add_handler(CommandHandler("cd", cd_cmd))
@@ -1965,7 +1774,6 @@ def main() -> None:
     application.add_handler(CommandHandler("pin", pin_cmd))
     application.add_handler(CommandHandler("unpin", unpin_cmd))
     application.add_handler(CommandHandler("run", run_cmd))
-    application.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^approval:"))
     application.add_handler(CallbackQueryHandler(sessions_callback, pattern=r"^sessions:"))
     application.add_handler(
         MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_message)

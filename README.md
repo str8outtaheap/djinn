@@ -6,7 +6,6 @@ Telegram bot bridge for the [Codex CLI](https://developers.openai.com/codex/cli)
 - Single authorized chat controls a stateful Djinn thread
 - Uses Codex App Server threads (`thread/start`, `thread/resume`, `turn/start`)
 - Live progress updates from structured item lifecycle events (`started`, `delta`, `completed`)
-- Telegram approval buttons for command/file-change approvals
 - Startup health ping ("Djinn online") to the authorized chat
 - Session browser and quick resume (`/sessions`, `/sessions here`, `/sessions use`)
 - `/cd`, `/status`, `/reset`, `/pin`, `/unpin`, `/run`, `/proj`
@@ -30,7 +29,6 @@ Optional:
 - `TELEGRAM_USER_ID` (strongly recommended in group chats)
 - `CODEX_CMD` (default: `codex`)
   On Apple Silicon, if subprocesses run under Rosetta, set `CODEX_CMD=arch -arm64 codex`.
-- `CODEX_APPROVAL_POLICY` (default: `on-request`)
 - `CODEX_WORKDIR` (default: launch directory)
 - `VOICE_TRANSCRIPTION` (`true` to enable)
 - `OPENAI_API_KEY` (required for voice transcription)
@@ -39,7 +37,7 @@ Optional:
 Codex CLI config (optional): `~/.codex/config.toml`
 ```toml
 sandbox_mode = "workspace-write"
-approval_policy = "on-request"
+approval_policy = "never"
 
 [sandbox_workspace_write]
 network_access = true
@@ -50,8 +48,6 @@ network_access = true
 - `/help`: show command help
 - `/cancel`: cancel the active turn or `/run` command
 - `/last`: resend the latest turn result
-- `/approve`: approve the most recent pending action
-- `/deny`: deny the most recent pending action
 - `/cd <path>`: change working directory (supports relative paths)
 - `/status`: show thread state and working directory
 - `/proj`: list project aliases
@@ -89,7 +85,7 @@ This bot can run shell commands and edit files.
 
 - Keep the bot token private.
 - Restrict `TELEGRAM_CHAT_ID` to a trusted chat.
-- In group chats, always set `TELEGRAM_USER_ID`; otherwise any chat member can issue commands and approve actions.
+- In group chats, always set `TELEGRAM_USER_ID`; otherwise any chat member can issue commands.
 
 ## License
 MIT

@@ -41,18 +41,6 @@ class CodexProgressEvent:
 
 
 @dataclass(slots=True)
-class CodexApprovalRequest:
-    request_id: int | str
-    kind: str
-    thread_id: str
-    turn_id: str
-    item_id: str
-    reason: str | None = None
-    command: str | None = None
-    cwd: str | None = None
-
-
-@dataclass(slots=True)
 class CodexTurnResult:
     thread_id: str
     turn_id: str
@@ -123,7 +111,6 @@ class CodexAppServerClient:
         self._turn_lock = asyncio.Lock()
 
         self._active_turn: _ActiveTurn | None = None
-        self._approval_handler: Callable[[CodexApprovalRequest], Awaitable[str]] | None = None
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -204,7 +191,6 @@ class CodexAppServerClient:
         *,
         thread_id: str | None,
         cwd: str,
-        approval_policy: str = "on-request",
         developer_instructions: str | None = None,
     ) -> tuple[str, str]:
         await self.start()
@@ -213,7 +199,7 @@ class CodexAppServerClient:
             resume_params: dict[str, Any] = {
                 "threadId": thread_id,
                 "cwd": cwd,
-                "approvalPolicy": approval_policy,
+                "approvalPolicy": "never",
             }
             if developer_instructions:
                 resume_params["developerInstructions"] = developer_instructions
@@ -235,7 +221,7 @@ class CodexAppServerClient:
 
         start_params: dict[str, Any] = {
             "cwd": cwd,
-            "approvalPolicy": approval_policy,
+            "approvalPolicy": "never",
         }
         if developer_instructions:
             start_params["developerInstructions"] = developer_instructions
@@ -249,16 +235,13 @@ class CodexAppServerClient:
         prompt: str,
         thread_id: str | None,
         cwd: str,
-        approval_policy: str = "on-request",
         developer_instructions: str | None = None,
         on_progress: Callable[[CodexProgressEvent], Awaitable[None]] | None = None,
-        on_approval: Callable[[CodexApprovalRequest], Awaitable[str]] | None = None,
     ) -> CodexTurnResult:
         async with self._turn_lock:
             resolved_thread_id, _ = await self.ensure_thread(
                 thread_id=thread_id,
                 cwd=cwd,
-                approval_policy=approval_policy,
                 developer_instructions=developer_instructions,
             )
 
@@ -285,7 +268,6 @@ class CodexAppServerClient:
             )
 
             self._active_turn = active_turn
-            self._approval_handler = on_approval
 
             # Handle edge case where turn is already terminal on response.
             status = turn.get("status")
@@ -307,7 +289,6 @@ class CodexAppServerClient:
             finally:
                 if self._active_turn is active_turn:
                     self._active_turn = None
-                self._approval_handler = None
 
     async def list_threads(
         self,
@@ -554,25 +535,11 @@ class CodexAppServerClient:
         }:
             if request_id is None:
                 return
-            approval = self._build_approval_request(
-                request_id=request_id,
-                method=method,
-                params=params,
-            )
-            decision = "decline"
-            if self._approval_handler is not None:
-                try:
-                    selected = await self._approval_handler(approval)
-                    if selected in {"accept", "acceptForSession", "decline", "cancel"}:
-                        decision = selected
-                except Exception as exc:
-                    LOGGER.exception("approval handler failed, defaulting to decline: %s", exc)
-                    decision = "decline"
             await self._send_json(
                 {
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {"decision": decision},
+                    "result": {"decision": "accept"},
                 }
             )
             return
@@ -875,25 +842,6 @@ class CodexAppServerClient:
             phase=phase,
             title=title,
             ok=None,
-        )
-
-    @staticmethod
-    def _build_approval_request(
-        *,
-        request_id: int | str,
-        method: str,
-        params: dict[str, Any],
-    ) -> CodexApprovalRequest:
-        kind = "command" if method == "item/commandExecution/requestApproval" else "file_change"
-        return CodexApprovalRequest(
-            request_id=request_id,
-            kind=kind,
-            thread_id=str(params.get("threadId") or ""),
-            turn_id=str(params.get("turnId") or ""),
-            item_id=str(params.get("itemId") or ""),
-            reason=params.get("reason") if isinstance(params.get("reason"), str) else None,
-            command=params.get("command") if isinstance(params.get("command"), str) else None,
-            cwd=params.get("cwd") if isinstance(params.get("cwd"), str) else None,
         )
 
     @staticmethod
