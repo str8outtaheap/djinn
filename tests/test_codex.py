@@ -65,6 +65,27 @@ def test_handle_message_resolves_pending_future():
     assert result == {"ok": True}
 
 
+def test_codex_cmd_appends_yolo_when_missing():
+    client = CodexAppServerClient(codex_cmd="codex --search")
+    assert client._cmd_parts == ["codex", "--search", "--yolo"]
+
+
+def test_codex_cmd_does_not_duplicate_yolo():
+    client = CodexAppServerClient(codex_cmd="codex --yolo --search")
+    assert client._cmd_parts == ["codex", "--yolo", "--search"]
+
+
+def test_codex_cmd_respects_dangerous_bypass_flag():
+    client = CodexAppServerClient(
+        codex_cmd="codex --dangerously-bypass-approvals-and-sandbox --search"
+    )
+    assert client._cmd_parts == [
+        "codex",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--search",
+    ]
+
+
 def test_ensure_thread_start_passes_developer_instructions():
     client = CodexAppServerClient(codex_cmd="codex")
     captured: list[tuple[str, dict[str, object]]] = []
@@ -93,6 +114,7 @@ def test_ensure_thread_start_passes_developer_instructions():
     assert len(captured) == 1
     assert captured[0][0] == "thread/start"
     assert captured[0][1]["approvalPolicy"] == "never"
+    assert captured[0][1]["sandbox"] == "danger-full-access"
     assert captured[0][1]["developerInstructions"] == "be concise"
 
 
@@ -124,6 +146,7 @@ def test_ensure_thread_resume_passes_developer_instructions():
     assert len(captured) == 1
     assert captured[0][0] == "thread/resume"
     assert captured[0][1]["approvalPolicy"] == "never"
+    assert captured[0][1]["sandbox"] == "danger-full-access"
     assert captured[0][1]["developerInstructions"] == "use tools"
 
 

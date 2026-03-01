@@ -27,7 +27,7 @@ Required:
 
 Optional:
 - `TELEGRAM_USER_ID` (strongly recommended in group chats)
-- `CODEX_CMD` (default: `codex`)
+- `CODEX_CMD` (default: `codex`; Djinn appends `--yolo` automatically unless you explicitly pass `--yolo` or `--dangerously-bypass-approvals-and-sandbox`)
   On Apple Silicon, if subprocesses run under Rosetta, set `CODEX_CMD=arch -arm64 codex`.
 - `CODEX_WORKDIR` (default: launch directory)
 - `VOICE_TRANSCRIPTION` (`true` to enable)

@@ -14,6 +14,9 @@ LOGGER = logging.getLogger(__name__)
 # Some app-server JSON-RPC messages (notably large thread listings) can exceed the
 # default asyncio StreamReader 64 KiB line limit. Raise it to avoid reader crashes.
 APP_SERVER_STREAM_LIMIT = 4 * 1024 * 1024
+YOLO_FLAG = "--yolo"
+DANGEROUS_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+YOLO_SANDBOX_MODE = "danger-full-access"
 
 
 class CodexError(RuntimeError):
@@ -91,6 +94,8 @@ class CodexAppServerClient:
         cmd_parts = shlex.split(codex_cmd)
         if not cmd_parts:
             raise ValueError("codex_cmd must not be empty")
+        if YOLO_FLAG not in cmd_parts and DANGEROUS_BYPASS_FLAG not in cmd_parts:
+            cmd_parts.append(YOLO_FLAG)
 
         self._cmd_parts = cmd_parts
         self._client_name = client_name
@@ -200,6 +205,7 @@ class CodexAppServerClient:
                 "threadId": thread_id,
                 "cwd": cwd,
                 "approvalPolicy": "never",
+                "sandbox": YOLO_SANDBOX_MODE,
             }
             if developer_instructions:
                 resume_params["developerInstructions"] = developer_instructions
@@ -222,6 +228,7 @@ class CodexAppServerClient:
         start_params: dict[str, Any] = {
             "cwd": cwd,
             "approvalPolicy": "never",
+            "sandbox": YOLO_SANDBOX_MODE,
         }
         if developer_instructions:
             start_params["developerInstructions"] = developer_instructions

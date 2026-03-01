@@ -13,8 +13,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID")
-
-CODEX_CMD = os.getenv("CODEX_CMD", "codex")
+CODEX_CMD = os.getenv("CODEX_CMD", "codex").strip() or "codex"
 
 
 def resolve_default_workdir() -> str:
