@@ -434,7 +434,7 @@ def build_help_text() -> str:
         "/pin <text> - set pinned context",
         "/pin - show current pin",
         "/unpin - clear pin",
-        "/run <command> - run a shell command in current workdir",
+        "/run <command> - run a command in current workdir",
         "/cd <path> - change workdir",
         "Advanced:",
         "/reset - clear current thread",
@@ -768,6 +768,29 @@ def enqueue_run_command_output(
         queue.put_nowait(delta)
     except asyncio.QueueFull:
         LOGGER.warning("run output queue remained full; dropping streamed output")
+
+
+async def close_run_command_progress(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    progress_message_id: int | None,
+    output_queue: asyncio.Queue[CodexCommandExecOutputDelta | None] | None,
+    output_task: asyncio.Task[None] | None,
+) -> None:
+    if output_task is not None and output_queue is not None:
+        if not output_task.done():
+            await output_queue.put(None)
+        try:
+            await output_task
+        except Exception as exc:
+            LOGGER.warning("run progress task failed: %s", exc)
+    if progress_message_id is not None:
+        await delete_message(
+            context.application,
+            chat_id=chat_id,
+            message_id=progress_message_id,
+        )
 
 
 # Command handlers
@@ -1246,77 +1269,56 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 failure = exc
         finally:
             state.active_command_exec_id = None
-            if output_task is not None and output_queue is not None:
-                if not output_task.done():
-                    await output_queue.put(None)
-                try:
-                    await output_task
-                except Exception as exc:
-                    LOGGER.warning("run progress task failed: %s", exc)
-            if progress_message_id is not None:
-                await delete_message(
-                    context.application,
-                    chat_id=int(update.effective_chat.id),
-                    message_id=progress_message_id,
-                )
+            await close_run_command_progress(
+                context=context,
+                chat_id=int(update.effective_chat.id),
+                progress_message_id=progress_message_id,
+                output_queue=output_queue,
+                output_task=output_task,
+            )
 
         stream_stdout = preview.stdout_tail
         stream_stderr = preview.stderr_tail
-        if timed_out:
-            state.command_cancel_requested = False
-            await send_message(
-                context.application,
-                render_run_command_result(
-                    command_text,
-                    stdout=stream_stdout,
-                    stderr=stream_stderr,
-                    timed_out=True,
-                    output_capped=preview.output_cap_reached,
-                ),
-                chat_id=int(update.effective_chat.id),
-                reply_to_message_id=update.message.message_id,
-                prefer_markdown=False,
-            )
-            await drain_queued_turns(context, state)
-            return
-
         state.command_cancel_requested = False
         if failure is not None:
             LOGGER.warning("failed to run command %s: %s", argv, failure)
             await update.message.reply_text(f"Failed to run: {failure}")
             await drain_queued_turns(context, state)
             return
-        if result is None:
-            await send_message(
-                context.application,
-                render_run_command_result(
-                    command_text,
-                    stdout=stream_stdout,
-                    stderr=stream_stderr,
-                    cancelled=cancelled,
-                    output_capped=preview.output_cap_reached,
-                ),
-                chat_id=int(update.effective_chat.id),
-                reply_to_message_id=update.message.message_id,
-                prefer_markdown=False,
-            )
-            await drain_queued_turns(context, state)
-            return
-        if is_command_not_found_result(result):
+        if result is not None and is_command_not_found_result(result):
             await update.message.reply_text(f"Command not found: {argv[0]}")
             await drain_queued_turns(context, state)
             return
 
-        await send_message(
-            context.application,
-            render_run_command_result(
+        if timed_out:
+            rendered = render_run_command_result(
+                command_text,
+                stdout=stream_stdout,
+                stderr=stream_stderr,
+                timed_out=True,
+                output_capped=preview.output_cap_reached,
+            )
+        elif result is None:
+            rendered = render_run_command_result(
+                command_text,
+                stdout=stream_stdout,
+                stderr=stream_stderr,
+                cancelled=cancelled,
+                output_capped=preview.output_cap_reached,
+            )
+        else:
+            rendered = render_run_command_result(
                 command_text,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 exit_code=result.exit_code,
                 cancelled=cancelled,
                 output_capped=preview.output_cap_reached,
-            ),
+            )
+
+        await send_message(
+            context.application,
+            rendered,
             chat_id=int(update.effective_chat.id),
             reply_to_message_id=update.message.message_id,
             prefer_markdown=False,
