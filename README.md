@@ -6,6 +6,7 @@ Telegram bot bridge for the [Codex CLI](https://developers.openai.com/codex/cli)
 - Single authorized chat controls a stateful Djinn thread
 - Uses Codex App Server threads (`thread/start`, `thread/resume`, `turn/start`)
 - Live progress updates from structured item lifecycle events (`started`, `delta`, `completed`)
+- App-server-backed `/run` with live stdout/stderr tail updates
 - Startup health ping ("Djinn online") to the authorized chat
 - Session browser and quick resume (`/sessions`, `/sessions here`, `/sessions use`)
 - `/cd`, `/status`, `/reset`, `/pin`, `/unpin`, `/run`, `/proj`
@@ -60,7 +61,7 @@ network_access = true
 - `/pin <text>`: set a short context note shown during runs
 - `/pin`: show current pin
 - `/unpin`: clear the pin
-- `/run <command>`: run a command in the current working directory (time-limited and output-capped for mobile usability)
+- `/run <command>`: run a command in the current working directory with live output updates, timeout protection, and capped final output
 
 When Djinn is busy, the latest incoming message is queued (one deep) and runs next.
 
@@ -81,7 +82,7 @@ uv run ty check .
 - Project contexts: `~/.djinn/projects.json` (`path`, `thread_id`, `pin`)
 
 ## Security Notes
-This bot can run shell commands and edit files.
+This bot can run commands and edit files.
 
 - Keep the bot token private.
 - Restrict `TELEGRAM_CHAT_ID` to a trusted chat.
