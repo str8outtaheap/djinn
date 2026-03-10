@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import shlex
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,6 +19,36 @@ APP_SERVER_STREAM_LIMIT = 4 * 1024 * 1024
 YOLO_FLAG = "--yolo"
 DANGEROUS_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
 YOLO_SANDBOX_MODE = "danger-full-access"
+
+
+def _is_valid_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _require_process_id(process_id: Any, *, method: str) -> str:
+    if not isinstance(process_id, str) or not process_id:
+        raise ValueError(f"{method} requires a non-empty string process_id")
+    return process_id
+
+
+def _decode_base64_bytes(value: str) -> bytes | None:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _json_safe_dict_copy(value: Any, *, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"command/exec {field_name} must be a dict when provided")
+    try:
+        payload = json.dumps(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"command/exec {field_name} must be JSON-serializable") from exc
+    copied = json.loads(payload)
+    if not isinstance(copied, dict):
+        raise ValueError(f"command/exec {field_name} must serialize to a JSON object")
+    return copied
 
 
 class CodexError(RuntimeError):
@@ -66,6 +98,135 @@ class CodexThreadSummary:
 class CodexThreadListResult:
     threads: list[CodexThreadSummary]
     next_cursor: str | None = None
+
+
+@dataclass(slots=True)
+class CodexCommandExecSize:
+    rows: int
+    cols: int
+
+    def to_rpc_params(self) -> dict[str, int]:
+        if not _is_valid_int(self.rows) or not _is_valid_int(self.cols):
+            raise ValueError("command/exec PTY size must use integer row/column counts")
+        if self.rows <= 0 or self.cols <= 0:
+            raise ValueError("command/exec PTY size must use positive row/column counts")
+        return {"rows": self.rows, "cols": self.cols}
+
+
+@dataclass(slots=True)
+class CodexCommandExecSpec:
+    command: Sequence[str]
+    process_id: str | None = None
+    tty: bool = False
+    stream_stdin: bool = False
+    stream_stdout_stderr: bool = False
+    output_bytes_cap: int | None = None
+    disable_output_cap: bool = False
+    disable_timeout: bool = False
+    timeout_ms: int | None = None
+    cwd: str | None = None
+    env: dict[str, str | None] | None = None
+    size: CodexCommandExecSize | None = None
+    sandbox_policy: dict[str, Any] | None = None
+
+    def to_rpc_params(self) -> dict[str, Any]:
+        if isinstance(self.command, (str, bytes, bytearray)):
+            raise ValueError("command/exec requires an argv sequence, not a single string/bytes")
+        command = list(self.command)
+        if not command or any(not isinstance(part, str) or not part for part in command):
+            raise ValueError("command/exec requires a non-empty argv vector")
+
+        process_id = None
+        if self.process_id is not None:
+            process_id = _require_process_id(self.process_id, method="command/exec")
+
+        if self.output_bytes_cap is not None:
+            if not _is_valid_int(self.output_bytes_cap):
+                raise ValueError("command/exec output_bytes_cap must be an integer")
+            if self.output_bytes_cap <= 0:
+                raise ValueError("command/exec output_bytes_cap must be positive")
+            if self.disable_output_cap:
+                raise ValueError(
+                    "command/exec cannot combine output_bytes_cap with disable_output_cap"
+                )
+
+        if self.timeout_ms is not None:
+            if not _is_valid_int(self.timeout_ms):
+                raise ValueError("command/exec timeout_ms must be an integer")
+            if self.timeout_ms <= 0:
+                raise ValueError("command/exec timeout_ms must be positive")
+            if self.disable_timeout:
+                raise ValueError("command/exec cannot combine timeout_ms with disable_timeout")
+
+        if self.size is not None and not self.tty:
+            raise ValueError("command/exec size requires tty=True")
+
+        stream_stdin = self.stream_stdin or self.tty
+        stream_stdout_stderr = self.stream_stdout_stderr or self.tty
+        if (self.tty or stream_stdin or stream_stdout_stderr) and not self.process_id:
+            raise ValueError(
+                "command/exec process_id is required when tty or streaming is enabled"
+            )
+
+        params: dict[str, Any] = {"command": command}
+        if process_id is not None:
+            params["processId"] = process_id
+        if self.tty:
+            params["tty"] = True
+        if stream_stdin:
+            params["streamStdin"] = True
+        if stream_stdout_stderr:
+            params["streamStdoutStderr"] = True
+        if self.output_bytes_cap is not None:
+            params["outputBytesCap"] = self.output_bytes_cap
+        if self.disable_output_cap:
+            params["disableOutputCap"] = True
+        if self.disable_timeout:
+            params["disableTimeout"] = True
+        if self.timeout_ms is not None:
+            params["timeoutMs"] = self.timeout_ms
+        if self.cwd is not None:
+            if not isinstance(self.cwd, str) or not self.cwd:
+                raise ValueError("command/exec cwd must be a non-empty string when provided")
+            params["cwd"] = self.cwd
+        if self.env is not None:
+            if not isinstance(self.env, dict):
+                raise ValueError("command/exec env must be a dict when provided")
+            env: dict[str, str | None] = {}
+            for key, value in self.env.items():
+                if not isinstance(key, str) or not key:
+                    raise ValueError("command/exec env keys must be non-empty strings")
+                if value is not None and not isinstance(value, str):
+                    raise ValueError("command/exec env values must be strings or None")
+                env[key] = value
+            params["env"] = env
+        if self.size is not None:
+            params["size"] = self.size.to_rpc_params()
+        if self.sandbox_policy is not None:
+            params["sandboxPolicy"] = _json_safe_dict_copy(
+                self.sandbox_policy,
+                field_name="sandbox_policy",
+            )
+        return params
+
+
+@dataclass(slots=True)
+class CodexCommandExecOutputDelta:
+    process_id: str
+    stream: Literal["stdout", "stderr"]
+    data: bytes
+    cap_reached: bool
+
+    @property
+    def text(self) -> str:
+        return self.data.decode("utf-8", errors="replace")
+
+
+@dataclass(slots=True)
+class CodexCommandExecResult:
+    exit_code: int
+    stdout: str
+    stderr: str
 
 
 @dataclass
@@ -401,6 +562,59 @@ class CodexAppServerClient:
                 exc,
             )
             return False
+
+    @staticmethod
+    def _extract_command_exec_result(response: Any) -> CodexCommandExecResult:
+        if not isinstance(response, dict):
+            raise CodexError("command/exec returned an invalid response")
+
+        exit_code = response.get("exitCode")
+        stdout = response.get("stdout")
+        stderr = response.get("stderr")
+        if not _is_valid_int(exit_code):
+            raise CodexError("command/exec response missing exitCode")
+        if not isinstance(stdout, str) or not isinstance(stderr, str):
+            raise CodexError("command/exec response missing stdout/stderr")
+
+        return CodexCommandExecResult(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    @staticmethod
+    def _extract_command_exec_output_delta(
+        params: Any,
+    ) -> CodexCommandExecOutputDelta | None:
+        if not isinstance(params, dict):
+            return None
+
+        process_id = params.get("processId")
+        stream = params.get("stream")
+        delta_base64 = params.get("deltaBase64")
+        cap_reached = params.get("capReached")
+        if not isinstance(process_id, str) or not process_id:
+            return None
+        if stream not in {"stdout", "stderr"}:
+            return None
+        if not isinstance(delta_base64, str) or not isinstance(cap_reached, bool):
+            return None
+
+        data = _decode_base64_bytes(delta_base64)
+        if data is None:
+            return None
+
+        return CodexCommandExecOutputDelta(
+            process_id=process_id,
+            stream=stream,
+            data=data,
+            cap_reached=cap_reached,
+        )
+
+    @staticmethod
+    def _build_command_exec_terminate_params(process_id: str) -> dict[str, Any]:
+        process_id = _require_process_id(process_id, method="command/exec/terminate")
+        return {"processId": process_id}
 
     async def _request(
         self,

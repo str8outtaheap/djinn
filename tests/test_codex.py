@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from types import SimpleNamespace
 
 import pytest
 
-from codex import CodexAppServerClient, CodexError
+from codex import (
+    CodexAppServerClient,
+    CodexCommandExecResult,
+    CodexCommandExecSize,
+    CodexCommandExecSpec,
+    CodexError,
+)
 
 
 def test_event_from_command_item_completed_success():
@@ -276,3 +283,144 @@ def test_interrupt_active_turn_sends_interrupt_request():
     assert captured == [
         ("turn/interrupt", {"threadId": "thread-1", "turnId": "turn-1"})
     ]
+
+
+def test_command_exec_spec_to_rpc_params_buffered_defaults():
+    spec = CodexCommandExecSpec(command=("git", "status"), cwd="/tmp/project")
+
+    assert spec.to_rpc_params() == {
+        "command": ["git", "status"],
+        "cwd": "/tmp/project",
+    }
+
+
+def test_command_exec_spec_tty_implies_streaming_and_requires_process_id():
+    spec = CodexCommandExecSpec(
+        command=("bash",),
+        process_id="proc-1",
+        tty=True,
+        size=CodexCommandExecSize(rows=24, cols=80),
+    )
+
+    assert spec.to_rpc_params() == {
+        "command": ["bash"],
+        "processId": "proc-1",
+        "tty": True,
+        "streamStdin": True,
+        "streamStdoutStderr": True,
+        "size": {"rows": 24, "cols": 80},
+    }
+
+
+def test_command_exec_spec_requires_process_id_for_streaming():
+    spec = CodexCommandExecSpec(command=("pytest",), stream_stdout_stderr=True)
+
+    with pytest.raises(ValueError, match="process_id"):
+        spec.to_rpc_params()
+
+
+def test_command_exec_spec_rejects_single_string_command():
+    spec = CodexCommandExecSpec(command="git status")
+
+    with pytest.raises(ValueError, match="argv sequence"):
+        spec.to_rpc_params()
+
+
+def test_command_exec_spec_rejects_conflicting_limits():
+    spec = CodexCommandExecSpec(
+        command=("pytest",),
+        output_bytes_cap=4096,
+        disable_output_cap=True,
+    )
+
+    with pytest.raises(ValueError, match="output_bytes_cap"):
+        spec.to_rpc_params()
+
+
+def test_command_exec_spec_validates_runtime_field_types():
+    with pytest.raises(ValueError, match="process_id"):
+        CodexCommandExecSpec(command=("pwd",), process_id=123).to_rpc_params()  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="cwd"):
+        CodexCommandExecSpec(command=("pwd",), cwd=123).to_rpc_params()  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="env values"):
+        CodexCommandExecSpec(
+            command=("pwd",),
+            env={"PATH": 7},  # type: ignore[dict-item]
+        ).to_rpc_params()
+
+
+def test_command_exec_spec_defensively_copies_json_safe_sandbox_policy():
+    sandbox_policy = {"mode": "workspace-write", "nested": {"network_access": True}}
+    params = CodexCommandExecSpec(
+        command=("pwd",),
+        sandbox_policy=sandbox_policy,
+    ).to_rpc_params()
+
+    sandbox_policy["nested"]["network_access"] = False
+
+    assert params["sandboxPolicy"] == {
+        "mode": "workspace-write",
+        "nested": {"network_access": True},
+    }
+
+
+def test_command_exec_spec_rejects_non_json_safe_sandbox_policy():
+    with pytest.raises(ValueError, match="JSON-serializable"):
+        CodexCommandExecSpec(
+            command=("pwd",),
+            sandbox_policy={"bad": object()},
+        ).to_rpc_params()
+
+
+def test_extract_command_exec_result_valid():
+    result = CodexAppServerClient._extract_command_exec_result(
+        {"exitCode": 0, "stdout": "ok\n", "stderr": ""}
+    )
+
+    assert result == CodexCommandExecResult(exit_code=0, stdout="ok\n", stderr="")
+
+
+def test_extract_command_exec_result_invalid():
+    with pytest.raises(CodexError, match="exitCode"):
+        CodexAppServerClient._extract_command_exec_result({"stdout": "", "stderr": ""})
+
+
+def test_extract_command_exec_output_delta_decodes_base64():
+    delta = CodexAppServerClient._extract_command_exec_output_delta(
+        {
+            "processId": "proc-1",
+            "stream": "stdout",
+            "deltaBase64": base64.b64encode(b"hello\n").decode("ascii"),
+            "capReached": False,
+        }
+    )
+
+    assert delta is not None
+    assert delta.process_id == "proc-1"
+    assert delta.stream == "stdout"
+    assert delta.data == b"hello\n"
+    assert delta.text == "hello\n"
+    assert delta.cap_reached is False
+
+
+def test_extract_command_exec_output_delta_rejects_invalid_payload():
+    delta = CodexAppServerClient._extract_command_exec_output_delta(
+        {
+            "processId": "proc-1",
+            "stream": "stdout",
+            "deltaBase64": "!!!not-base64!!!",
+            "capReached": False,
+        }
+    )
+
+    assert delta is None
+
+
+def test_build_command_exec_terminate_params():
+    terminate = CodexAppServerClient._build_command_exec_terminate_params("proc-1")
+
+    assert terminate == {"processId": "proc-1"}
+
+
