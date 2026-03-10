@@ -42,8 +42,8 @@ class BotState:
     active_project: str | None = None
     pin: str | None = None
     run_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    active_shell_proc: asyncio.subprocess.Process | None = None
-    shell_cancel_requested: bool = False
+    active_command_exec_id: str | None = None
+    command_cancel_requested: bool = False
     queued_turn: QueuedTurn | None = None
     last_session_ids: list[str] = field(default_factory=list)
     last_turn_result: str | None = None

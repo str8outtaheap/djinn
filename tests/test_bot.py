@@ -12,6 +12,7 @@ import bot
 import commands
 import state as bot_state
 from codex import (
+    CodexCommandExecResult,
     CodexProgressEvent,
     CodexThreadListResult,
     CodexThreadSummary,
@@ -389,6 +390,102 @@ def test_on_message_busy_replaces_one_deep_queue(monkeypatch):
         "Djinn is busy. Queued your message and will run it next.",
         "Djinn is busy. Replaced the queued message with your latest one.",
     ]
+
+
+def test_run_cmd_uses_command_exec_and_formats_result(monkeypatch):
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
+    state = bot.BotState(workdir="/tmp/project")
+    context = _context_with_state(state)
+    context.args = ["echo", "hello"]
+    message, replies = _message(text="/run echo hello", message_id=90)
+    update = _update_with_message(chat_id=123, user_id=7, message=message)
+    sent: list[str] = []
+
+    class FakeClient:
+        def new_command_exec_process_id(self) -> str:
+            return "proc-1"
+
+        async def run_command_exec(self, *, spec, on_output=None):
+            assert on_output is None
+            assert spec.to_rpc_params() == {
+                "command": ["echo", "hello"],
+                "cwd": "/tmp/project",
+                "processId": "proc-1",
+            }
+            return CodexCommandExecResult(exit_code=0, stdout="hello\n", stderr="")
+
+    async def fake_get_codex_client(_state):
+        return FakeClient()
+
+    async def fake_send_message(_application, text: str, **_kwargs):
+        sent.append(text)
+        return None
+
+    monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
+
+    asyncio.run(commands.run_cmd(update, context))
+
+    assert replies == []
+    assert sent == ["$ echo hello\nhello\n(exit 0)"]
+    assert state.active_command_exec_id is None
+
+
+def test_run_cmd_reports_command_not_found_from_exec_result(monkeypatch):
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
+    state = bot.BotState(workdir="/tmp/project")
+    context = _context_with_state(state)
+    context.args = ["missing-cmd"]
+    message, replies = _message(text="/run missing-cmd", message_id=91)
+    update = _update_with_message(chat_id=123, user_id=7, message=message)
+
+    class FakeClient:
+        def new_command_exec_process_id(self) -> str:
+            return "proc-404"
+
+        async def run_command_exec(self, *, spec, on_output=None):
+            del spec, on_output
+            return CodexCommandExecResult(
+                exit_code=127,
+                stdout="",
+                stderr="No such file or directory",
+            )
+
+    async def fake_get_codex_client(_state):
+        return FakeClient()
+
+    monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
+
+    asyncio.run(commands.run_cmd(update, context))
+
+    assert replies == ["Command not found: missing-cmd"]
+    assert state.active_command_exec_id is None
+
+
+def test_cancel_cmd_terminates_active_command_exec(monkeypatch):
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
+    terminated: list[str] = []
+
+    class FakeClient:
+        async def terminate_command_exec(self, process_id: str) -> None:
+            terminated.append(process_id)
+
+        async def interrupt_active_turn(self) -> bool:
+            return False
+
+    state = bot.BotState(active_command_exec_id="proc-1", codex=cast(Any, FakeClient()))
+    context = _context_with_state(state)
+    message, replies = _message(text="/cancel", message_id=92)
+    update = _update_with_message(chat_id=123, user_id=7, message=message)
+
+    asyncio.run(commands.cancel_cmd(update, context))
+
+    assert terminated == ["proc-1"]
+    assert state.command_cancel_requested is True
+    assert replies == ["Cancellation requested for shell command."]
 
 
 def test_last_cmd_resends_saved_result(monkeypatch):

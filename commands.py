@@ -17,6 +17,8 @@ from telegram.ext import Application, ContextTypes
 
 from codex import (
     CodexAppServerClient,
+    CodexCommandExecResult,
+    CodexCommandExecSpec,
     CodexProgressEvent,
     CodexThreadSummary,
     CodexTurnResult,
@@ -53,6 +55,14 @@ from state import (
 from telegram_utils import delete_message, edit_message, send_message
 
 LOGGER = logging.getLogger(__name__)
+COMMAND_NOT_FOUND_MARKERS = (
+    "command not found",
+    "executable file not found",
+    "no such file or directory",
+    "program not found",
+)
+
+
 def format_elapsed(elapsed_s: float) -> str:
     total = max(0, int(elapsed_s))
     minutes, seconds = divmod(total, 60)
@@ -174,6 +184,13 @@ def truncate_output(text: str, *, max_chars: int, label: str) -> str:
         return text
     clipped = text[:max_chars].rstrip()
     return f"{clipped}\n... ({label} truncated to {max_chars} chars)"
+
+
+def is_command_not_found_result(result: CodexCommandExecResult) -> bool:
+    if result.exit_code != 127:
+        return False
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).lower()
+    return any(marker in output for marker in COMMAND_NOT_FOUND_MARKERS)
 
 
 def _short_thread_id(thread_id: str) -> str:
@@ -309,15 +326,35 @@ def build_help_text() -> str:
     return "\n".join(lines)
 
 
-async def terminate_process(proc: asyncio.subprocess.Process, *, grace_s: float = 3.0) -> None:
-    if proc.returncode is not None:
-        return
-    proc.terminate()
+async def terminate_command_exec_task(
+    client: CodexAppServerClient,
+    *,
+    process_id: str,
+    task: asyncio.Task[CodexCommandExecResult],
+    grace_s: float = 3.0,
+) -> None:
     try:
-        await asyncio.wait_for(proc.wait(), timeout=grace_s)
+        await client.terminate_command_exec(process_id)
+    except Exception as exc:
+        LOGGER.warning("failed to terminate active command/exec %s: %s", process_id, exc)
+
+    if task.done():
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        return
+
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=grace_s)
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 def render_progress(progress: ProgressState, *, label: str, pin: str | None = None) -> str:
@@ -572,17 +609,17 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     state: BotState = context.application.bot_data["state"]
     cancelled: list[str] = []
 
-    proc = state.active_shell_proc
-    if proc is not None and proc.returncode is None:
-        state.shell_cancel_requested = True
+    client = state.codex
+    process_id = state.active_command_exec_id
+    if process_id and client is not None:
+        state.command_cancel_requested = True
         try:
-            await terminate_process(proc, grace_s=1.0)
+            await client.terminate_command_exec(process_id)
         except Exception as exc:
             LOGGER.warning("failed to terminate active shell command: %s", exc)
         else:
             cancelled.append("shell command")
 
-    client = state.codex
     if client is not None:
         try:
             if await client.interrupt_active_turn():
@@ -933,44 +970,65 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     async with state.run_lock:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=state.workdir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            await update.message.reply_text(f"Command not found: {argv[0]}")
-            await drain_queued_turns(context, state)
-            return
+            client = await get_codex_client(state)
         except Exception as exc:
-            LOGGER.warning("failed to start command %s: %s", argv, exc)
+            LOGGER.warning("failed to start app-server command %s: %s", argv, exc)
             await update.message.reply_text(f"Failed to start: {exc}")
             await drain_queued_turns(context, state)
             return
 
-        state.active_shell_proc = proc
-        state.shell_cancel_requested = False
+        process_id = client.new_command_exec_process_id()
+        task = asyncio.create_task(
+            client.run_command_exec(
+                spec=CodexCommandExecSpec(
+                    command=argv,
+                    cwd=state.workdir,
+                    process_id=process_id,
+                )
+            )
+        )
+        state.active_command_exec_id = process_id
+        state.command_cancel_requested = False
         timed_out = False
+        cancelled = False
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
+            result = await asyncio.wait_for(
+                asyncio.shield(task),
                 timeout=RUN_COMMAND_TIMEOUT_S,
             )
         except TimeoutError:
             timed_out = True
+            state.command_cancel_requested = True
             LOGGER.warning(
                 "command timed out after %.1fs: %s",
                 RUN_COMMAND_TIMEOUT_S,
                 argv,
             )
-            await terminate_process(proc)
-            stdout = b""
-            stderr = b""
+            await terminate_command_exec_task(
+                client,
+                process_id=process_id,
+                task=task,
+            )
+        except Exception as exc:
+            cancelled = state.command_cancel_requested
+            state.command_cancel_requested = False
+            if cancelled:
+                await send_message(
+                    context.application,
+                    f"$ {' '.join(argv)}\n(cancelled by user)",
+                    chat_id=int(update.effective_chat.id),
+                    reply_to_message_id=update.message.message_id,
+                )
+            else:
+                LOGGER.warning("failed to run command %s: %s", argv, exc)
+                await update.message.reply_text(f"Failed to run: {exc}")
+            await drain_queued_turns(context, state)
+            return
         finally:
-            state.active_shell_proc = None
+            state.active_command_exec_id = None
 
         if timed_out:
+            state.command_cancel_requested = False
             await send_message(
                 context.application,
                 f"$ {' '.join(argv)}\n(command timed out after {int(RUN_COMMAND_TIMEOUT_S)}s)",
@@ -980,11 +1038,15 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await drain_queued_turns(context, state)
             return
 
-        cancelled = state.shell_cancel_requested
-        state.shell_cancel_requested = False
+        cancelled = state.command_cancel_requested
+        state.command_cancel_requested = False
+        if is_command_not_found_result(result):
+            await update.message.reply_text(f"Command not found: {argv[0]}")
+            await drain_queued_turns(context, state)
+            return
 
-        out = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
-        err = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+        out = result.stdout.strip()
+        err = result.stderr.strip()
 
         parts: list[str] = [f"$ {' '.join(argv)}"]
         if out:
@@ -993,7 +1055,7 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parts.append(truncate_output(err, max_chars=RUN_OUTPUT_MAX_CHARS, label="stderr"))
         if cancelled:
             parts.append("(cancelled by user)")
-        parts.append(f"(exit {proc.returncode})")
+        parts.append(f"(exit {result.exit_code})")
 
         await send_message(
             context.application,
@@ -1313,4 +1375,3 @@ async def shutdown(application: Application) -> None:
     state = application.bot_data.get("state")
     if isinstance(state, BotState) and state.codex is not None:
         await state.codex.close()
-
