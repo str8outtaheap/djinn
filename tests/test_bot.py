@@ -12,6 +12,7 @@ import bot
 import commands
 import state as bot_state
 from codex import (
+    CodexCommandExecOutputDelta,
     CodexCommandExecResult,
     CodexProgressEvent,
     CodexThreadListResult,
@@ -395,24 +396,37 @@ def test_on_message_busy_replaces_one_deep_queue(monkeypatch):
 def test_run_cmd_uses_command_exec_and_formats_result(monkeypatch):
     monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
     monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "format_elapsed", lambda _elapsed: "0s")
     state = bot.BotState(workdir="/tmp/project")
     context = _context_with_state(state)
     context.args = ["echo", "hello"]
     message, replies = _message(text="/run echo hello", message_id=90)
     update = _update_with_message(chat_id=123, user_id=7, message=message)
     sent: list[str] = []
+    edited: list[str] = []
+    deleted: list[tuple[int, int]] = []
 
     class FakeClient:
         def new_command_exec_process_id(self) -> str:
             return "proc-1"
 
         async def run_command_exec(self, *, spec, on_output=None):
-            assert on_output is None
             assert spec.to_rpc_params() == {
                 "command": ["echo", "hello"],
                 "cwd": "/tmp/project",
                 "processId": "proc-1",
+                "outputBytesCap": 8000,
+                "streamStdoutStderr": True,
             }
+            assert on_output is not None
+            await on_output(
+                CodexCommandExecOutputDelta(
+                    process_id="proc-1",
+                    stream="stdout",
+                    data=b"hello\n",
+                    cap_reached=False,
+                )
+            )
             return CodexCommandExecResult(exit_code=0, stdout="hello\n", stderr="")
 
     async def fake_get_codex_client(_state):
@@ -420,15 +434,28 @@ def test_run_cmd_uses_command_exec_and_formats_result(monkeypatch):
 
     async def fake_send_message(_application, text: str, **_kwargs):
         sent.append(text)
-        return None
+        return 501 if len(sent) == 1 else 777
+
+    async def fake_edit_message(_application, *, text: str, **_kwargs):
+        edited.append(text)
+
+    async def fake_delete_message(_application, *, chat_id: int, message_id: int):
+        deleted.append((chat_id, message_id))
 
     monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
     monkeypatch.setattr(commands, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "edit_message", fake_edit_message)
+    monkeypatch.setattr(commands, "delete_message", fake_delete_message)
 
     asyncio.run(commands.run_cmd(update, context))
 
     assert replies == []
-    assert sent == ["$ echo hello\nhello\n(exit 0)"]
+    assert sent == [
+        "$ echo hello\n(running 0s)\n\n(waiting for output)",
+        "$ echo hello\nhello\n(exit 0)",
+    ]
+    assert edited == ["$ echo hello\n(running 0s)\n\nstdout:\nhello"]
+    assert deleted == [(123, 501)]
     assert state.active_command_exec_id is None
 
 
@@ -456,7 +483,12 @@ def test_run_cmd_reports_command_not_found_from_exec_result(monkeypatch):
     async def fake_get_codex_client(_state):
         return FakeClient()
 
+    async def fake_send_message(_application, text: str, **_kwargs):
+        del text
+        return None
+
     monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
 
     asyncio.run(commands.run_cmd(update, context))
 
@@ -485,7 +517,85 @@ def test_cancel_cmd_terminates_active_command_exec(monkeypatch):
 
     assert terminated == ["proc-1"]
     assert state.command_cancel_requested is True
-    assert replies == ["Cancellation requested for shell command."]
+    assert replies == ["Cancellation requested for run command."]
+
+
+def test_run_cmd_reports_cancelled_output_after_streaming(monkeypatch):
+    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
+    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
+    monkeypatch.setattr(commands, "format_elapsed", lambda _elapsed: "0s")
+    state = bot.BotState(workdir="/tmp/project")
+    context = _context_with_state(state)
+    context.args = ["sleep", "10"]
+    message, replies = _message(text="/run sleep 10", message_id=93)
+    update = _update_with_message(chat_id=123, user_id=7, message=message)
+    sent: list[str] = []
+    edited: list[str] = []
+    deleted: list[tuple[int, int]] = []
+
+    class FakeClient:
+        def new_command_exec_process_id(self) -> str:
+            return "proc-cancel"
+
+        async def run_command_exec(self, *, spec, on_output=None):
+            assert spec.to_rpc_params() == {
+                "command": ["sleep", "10"],
+                "cwd": "/tmp/project",
+                "processId": "proc-cancel",
+                "outputBytesCap": 8000,
+                "streamStdoutStderr": True,
+            }
+            assert on_output is not None
+            await on_output(
+                CodexCommandExecOutputDelta(
+                    process_id="proc-cancel",
+                    stream="stdout",
+                    data=b"partial output\n",
+                    cap_reached=False,
+                )
+            )
+            state.command_cancel_requested = True
+            raise RuntimeError("terminated")
+
+    async def fake_get_codex_client(_state):
+        return FakeClient()
+
+    async def fake_send_message(_application, text: str, **_kwargs):
+        sent.append(text)
+        return 601 if len(sent) == 1 else 778
+
+    async def fake_edit_message(_application, *, text: str, **_kwargs):
+        edited.append(text)
+
+    async def fake_delete_message(_application, *, chat_id: int, message_id: int):
+        deleted.append((chat_id, message_id))
+
+    monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
+    monkeypatch.setattr(commands, "send_message", fake_send_message)
+    monkeypatch.setattr(commands, "edit_message", fake_edit_message)
+    monkeypatch.setattr(commands, "delete_message", fake_delete_message)
+
+    asyncio.run(commands.run_cmd(update, context))
+
+    assert replies == []
+    assert sent == [
+        "$ sleep 10\n(running 0s)\n\n(waiting for output)",
+        "$ sleep 10\npartial output\n(cancelled by user)",
+    ]
+    assert edited == ["$ sleep 10\n(running 0s)\n\nstdout:\npartial output"]
+    assert deleted == [(123, 601)]
+    assert state.active_command_exec_id is None
+    assert state.command_cancel_requested is False
+
+
+def test_render_run_command_result_marks_output_cap():
+    rendered = commands.render_run_command_result(
+        "echo hello",
+        stdout="hello\n",
+        output_capped=True,
+    )
+
+    assert rendered == "$ echo hello\nhello\n(app-server output capped)"
 
 
 def test_last_cmd_resends_saved_result(monkeypatch):

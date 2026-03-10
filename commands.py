@@ -8,6 +8,7 @@ import shlex
 import textwrap
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
@@ -17,6 +18,7 @@ from telegram.ext import Application, ContextTypes
 
 from codex import (
     CodexAppServerClient,
+    CodexCommandExecOutputDelta,
     CodexCommandExecResult,
     CodexCommandExecSpec,
     CodexProgressEvent,
@@ -61,6 +63,53 @@ COMMAND_NOT_FOUND_MARKERS = (
     "no such file or directory",
     "program not found",
 )
+RUN_STREAM_PREVIEW_MAX_CHARS = 1200
+RUN_STREAM_QUEUE_SIZE = 200
+
+
+@dataclass(slots=True)
+class RunCommandStreamPreview:
+    started_at: float
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    output_cap_reached: bool = False
+
+    def note_delta(self, delta: CodexCommandExecOutputDelta) -> bool:
+        changed = False
+        if delta.cap_reached and not self.output_cap_reached:
+            self.output_cap_reached = True
+            changed = True
+
+        chunk = delta.text
+        if not chunk:
+            return changed
+
+        if delta.stream == "stdout":
+            updated, truncated = _append_run_stream_tail(
+                self.stdout_tail,
+                chunk,
+                max_chars=RUN_STREAM_PREVIEW_MAX_CHARS,
+                already_truncated=self.stdout_truncated,
+            )
+            if updated != self.stdout_tail or truncated != self.stdout_truncated:
+                self.stdout_tail = updated
+                self.stdout_truncated = truncated
+                changed = True
+            return changed
+
+        updated, truncated = _append_run_stream_tail(
+            self.stderr_tail,
+            chunk,
+            max_chars=RUN_STREAM_PREVIEW_MAX_CHARS,
+            already_truncated=self.stderr_truncated,
+        )
+        if updated != self.stderr_tail or truncated != self.stderr_truncated:
+            self.stderr_tail = updated
+            self.stderr_truncated = truncated
+            changed = True
+        return changed
 
 
 def format_elapsed(elapsed_s: float) -> str:
@@ -186,11 +235,78 @@ def truncate_output(text: str, *, max_chars: int, label: str) -> str:
     return f"{clipped}\n... ({label} truncated to {max_chars} chars)"
 
 
+def _append_run_stream_tail(
+    existing: str,
+    chunk: str,
+    *,
+    max_chars: int,
+    already_truncated: bool,
+) -> tuple[str, bool]:
+    if not chunk:
+        return existing, already_truncated
+    combined = existing + chunk
+    truncated = already_truncated or len(combined) > max_chars
+    if len(combined) > max_chars:
+        combined = combined[-max_chars:]
+    return combined, truncated
+
+
 def is_command_not_found_result(result: CodexCommandExecResult) -> bool:
     if result.exit_code != 127:
         return False
     output = "\n".join(part for part in (result.stdout, result.stderr) if part).lower()
     return any(marker in output for marker in COMMAND_NOT_FOUND_MARKERS)
+
+
+def render_run_command_progress(command_text: str, preview: RunCommandStreamPreview) -> str:
+    header = f"$ {command_text}\n(running {format_elapsed(time.monotonic() - preview.started_at)})"
+    parts = [header]
+
+    stdout = preview.stdout_tail.rstrip("\n")
+    if stdout:
+        title = "stdout (latest tail):" if preview.stdout_truncated else "stdout:"
+        parts.append(f"{title}\n{stdout}")
+
+    stderr = preview.stderr_tail.rstrip("\n")
+    if stderr:
+        title = "stderr (latest tail):" if preview.stderr_truncated else "stderr:"
+        parts.append(f"{title}\n{stderr}")
+
+    if not stdout and not stderr:
+        parts.append("(waiting for output)")
+
+    if preview.output_cap_reached:
+        parts.append("(app-server output cap reached)")
+
+    return "\n\n".join(parts)
+
+
+def render_run_command_result(
+    command_text: str,
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    exit_code: int | None = None,
+    cancelled: bool = False,
+    timed_out: bool = False,
+    output_capped: bool = False,
+) -> str:
+    parts: list[str] = [f"$ {command_text}"]
+    stdout_text = stdout.strip()
+    stderr_text = stderr.strip()
+    if stdout_text:
+        parts.append(truncate_output(stdout_text, max_chars=RUN_OUTPUT_MAX_CHARS, label="stdout"))
+    if stderr_text:
+        parts.append(truncate_output(stderr_text, max_chars=RUN_OUTPUT_MAX_CHARS, label="stderr"))
+    if output_capped:
+        parts.append("(app-server output capped)")
+    if timed_out:
+        parts.append(f"(command timed out after {int(RUN_COMMAND_TIMEOUT_S)}s)")
+    if cancelled:
+        parts.append("(cancelled by user)")
+    if exit_code is not None:
+        parts.append(f"(exit {exit_code})")
+    return "\n".join(parts)
 
 
 def _short_thread_id(thread_id: str) -> str:
@@ -582,6 +698,78 @@ async def progress_loop(
         await maybe_render(force=True)
 
 
+async def run_command_stream_loop(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    progress_message_id: int,
+    command_text: str,
+    preview: RunCommandStreamPreview,
+    queue: asyncio.Queue[CodexCommandExecOutputDelta | None],
+) -> None:
+    last_rendered: str | None = None
+    last_edit_at = 0.0
+
+    async def maybe_render(force: bool = False) -> None:
+        nonlocal last_rendered, last_edit_at
+        now = time.monotonic()
+        if not force and now - last_edit_at < PROGRESS_EDIT_MIN_INTERVAL_S:
+            return
+        rendered = render_run_command_progress(command_text, preview)
+        if rendered == last_rendered:
+            return
+        await edit_message(
+            context.application,
+            chat_id=chat_id,
+            message_id=progress_message_id,
+            text=rendered,
+            prefer_markdown=False,
+        )
+        last_rendered = rendered
+        last_edit_at = now
+
+    while True:
+        try:
+            event = await asyncio.wait_for(queue.get(), timeout=PROGRESS_TICK_S)
+            has_event = True
+        except TimeoutError:
+            event = None
+            has_event = False
+
+        if has_event and event is None:
+            await maybe_render(force=True)
+            return
+
+        if has_event:
+            assert event is not None
+            if preview.note_delta(event):
+                await maybe_render()
+                continue
+
+        await maybe_render()
+
+
+def enqueue_run_command_output(
+    queue: asyncio.Queue[CodexCommandExecOutputDelta | None],
+    delta: CodexCommandExecOutputDelta,
+) -> None:
+    try:
+        queue.put_nowait(delta)
+        return
+    except asyncio.QueueFull:
+        pass
+
+    try:
+        queue.get_nowait()
+    except asyncio.QueueEmpty:
+        LOGGER.warning("run output queue reported full without an item to evict")
+
+    try:
+        queue.put_nowait(delta)
+    except asyncio.QueueFull:
+        LOGGER.warning("run output queue remained full; dropping streamed output")
+
+
 # Command handlers
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -616,9 +804,9 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         try:
             await client.terminate_command_exec(process_id)
         except Exception as exc:
-            LOGGER.warning("failed to terminate active shell command: %s", exc)
+            LOGGER.warning("failed to terminate active run command: %s", exc)
         else:
-            cancelled.append("shell command")
+            cancelled.append("run command")
 
     if client is not None:
         try:
@@ -969,6 +1157,7 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with state.run_lock:
+        command_text = " ".join(argv)
         try:
             client = await get_codex_client(state)
         except Exception as exc:
@@ -977,6 +1166,42 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await drain_queued_turns(context, state)
             return
 
+        preview = RunCommandStreamPreview(started_at=time.monotonic())
+        progress_message_id = None
+        try:
+            progress_message_id = await send_message(
+                context.application,
+                render_run_command_progress(command_text, preview),
+                chat_id=int(update.effective_chat.id),
+                reply_to_message_id=update.message.message_id,
+                disable_notification=True,
+                prefer_markdown=False,
+            )
+        except Exception as exc:
+            LOGGER.warning("failed to send run progress message: %s", exc)
+            progress_message_id = None
+
+        output_queue: asyncio.Queue[CodexCommandExecOutputDelta | None] | None = None
+        output_task: asyncio.Task[None] | None = None
+        if progress_message_id is not None:
+            output_queue = asyncio.Queue(maxsize=RUN_STREAM_QUEUE_SIZE)
+            output_task = asyncio.create_task(
+                run_command_stream_loop(
+                    context=context,
+                    chat_id=int(update.effective_chat.id),
+                    progress_message_id=progress_message_id,
+                    command_text=command_text,
+                    preview=preview,
+                    queue=output_queue,
+                )
+            )
+
+        async def on_output(delta: CodexCommandExecOutputDelta) -> None:
+            if output_queue is None:
+                preview.note_delta(delta)
+                return
+            enqueue_run_command_output(output_queue, delta)
+
         process_id = client.new_command_exec_process_id()
         task = asyncio.create_task(
             client.run_command_exec(
@@ -984,18 +1209,24 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     command=argv,
                     cwd=state.workdir,
                     process_id=process_id,
-                )
+                    stream_stdout_stderr=True,
+                    output_bytes_cap=RUN_OUTPUT_MAX_CHARS,
+                ),
+                on_output=on_output,
             )
         )
         state.active_command_exec_id = process_id
         state.command_cancel_requested = False
         timed_out = False
         cancelled = False
+        failure: Exception | None = None
+        result: CodexCommandExecResult | None = None
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(task),
                 timeout=RUN_COMMAND_TIMEOUT_S,
             )
+            cancelled = state.command_cancel_requested
         except TimeoutError:
             timed_out = True
             state.command_cancel_requested = True
@@ -1011,57 +1242,84 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception as exc:
             cancelled = state.command_cancel_requested
-            state.command_cancel_requested = False
-            if cancelled:
-                await send_message(
-                    context.application,
-                    f"$ {' '.join(argv)}\n(cancelled by user)",
-                    chat_id=int(update.effective_chat.id),
-                    reply_to_message_id=update.message.message_id,
-                )
-            else:
-                LOGGER.warning("failed to run command %s: %s", argv, exc)
-                await update.message.reply_text(f"Failed to run: {exc}")
-            await drain_queued_turns(context, state)
-            return
+            if not cancelled:
+                failure = exc
         finally:
             state.active_command_exec_id = None
+            if output_task is not None and output_queue is not None:
+                if not output_task.done():
+                    await output_queue.put(None)
+                try:
+                    await output_task
+                except Exception as exc:
+                    LOGGER.warning("run progress task failed: %s", exc)
+            if progress_message_id is not None:
+                await delete_message(
+                    context.application,
+                    chat_id=int(update.effective_chat.id),
+                    message_id=progress_message_id,
+                )
 
+        stream_stdout = preview.stdout_tail
+        stream_stderr = preview.stderr_tail
         if timed_out:
             state.command_cancel_requested = False
             await send_message(
                 context.application,
-                f"$ {' '.join(argv)}\n(command timed out after {int(RUN_COMMAND_TIMEOUT_S)}s)",
+                render_run_command_result(
+                    command_text,
+                    stdout=stream_stdout,
+                    stderr=stream_stderr,
+                    timed_out=True,
+                    output_capped=preview.output_cap_reached,
+                ),
                 chat_id=int(update.effective_chat.id),
                 reply_to_message_id=update.message.message_id,
+                prefer_markdown=False,
             )
             await drain_queued_turns(context, state)
             return
 
-        cancelled = state.command_cancel_requested
         state.command_cancel_requested = False
+        if failure is not None:
+            LOGGER.warning("failed to run command %s: %s", argv, failure)
+            await update.message.reply_text(f"Failed to run: {failure}")
+            await drain_queued_turns(context, state)
+            return
+        if result is None:
+            await send_message(
+                context.application,
+                render_run_command_result(
+                    command_text,
+                    stdout=stream_stdout,
+                    stderr=stream_stderr,
+                    cancelled=cancelled,
+                    output_capped=preview.output_cap_reached,
+                ),
+                chat_id=int(update.effective_chat.id),
+                reply_to_message_id=update.message.message_id,
+                prefer_markdown=False,
+            )
+            await drain_queued_turns(context, state)
+            return
         if is_command_not_found_result(result):
             await update.message.reply_text(f"Command not found: {argv[0]}")
             await drain_queued_turns(context, state)
             return
 
-        out = result.stdout.strip()
-        err = result.stderr.strip()
-
-        parts: list[str] = [f"$ {' '.join(argv)}"]
-        if out:
-            parts.append(truncate_output(out, max_chars=RUN_OUTPUT_MAX_CHARS, label="stdout"))
-        if err:
-            parts.append(truncate_output(err, max_chars=RUN_OUTPUT_MAX_CHARS, label="stderr"))
-        if cancelled:
-            parts.append("(cancelled by user)")
-        parts.append(f"(exit {result.exit_code})")
-
         await send_message(
             context.application,
-            "\n".join(parts),
+            render_run_command_result(
+                command_text,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                cancelled=cancelled,
+                output_capped=preview.output_cap_reached,
+            ),
             chat_id=int(update.effective_chat.id),
             reply_to_message_id=update.message.message_id,
+            prefer_markdown=False,
         )
         await drain_queued_turns(context, state)
 
