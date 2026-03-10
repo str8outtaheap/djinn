@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 LOGGER = logging.getLogger(__name__)
 
@@ -230,6 +231,26 @@ class CodexCommandExecResult:
 
 
 @dataclass
+class _ActiveCommandExec:
+    process_id: str
+    on_output: Callable[[CodexCommandExecOutputDelta], Awaitable[None]] | None
+    stdout_buffer: bytearray = field(default_factory=bytearray)
+    stderr_buffer: bytearray = field(default_factory=bytearray)
+
+    def append_output(self, delta: CodexCommandExecOutputDelta) -> None:
+        if delta.stream == "stdout":
+            self.stdout_buffer.extend(delta.data)
+        else:
+            self.stderr_buffer.extend(delta.data)
+
+    def buffered_stdout(self) -> str:
+        return self.stdout_buffer.decode("utf-8", errors="replace")
+
+    def buffered_stderr(self) -> str:
+        return self.stderr_buffer.decode("utf-8", errors="replace")
+
+
+@dataclass
 class _ActiveTurn:
     thread_id: str
     turn_id: str
@@ -277,6 +298,7 @@ class CodexAppServerClient:
         self._turn_lock = asyncio.Lock()
 
         self._active_turn: _ActiveTurn | None = None
+        self._active_command_execs: dict[str, _ActiveCommandExec] = {}
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -347,6 +369,7 @@ class CodexAppServerClient:
 
         self._reader_task = None
         self._stderr_task = None
+        self._active_command_execs.clear()
 
         failure = CodexError("codex app-server closed")
         self._fail_pending_requests(failure)
@@ -562,6 +585,61 @@ class CodexAppServerClient:
                 exc,
             )
             return False
+
+    @staticmethod
+    def new_command_exec_process_id() -> str:
+        return uuid4().hex
+
+    async def run_command_exec(
+        self,
+        *,
+        spec: CodexCommandExecSpec,
+        on_output: Callable[[CodexCommandExecOutputDelta], Awaitable[None]] | None = None,
+    ) -> CodexCommandExecResult:
+        await self.start()
+
+        params = spec.to_rpc_params()
+        process_id = params.get("processId")
+        tracks_streamed_output = params.get("streamStdoutStderr") is True and isinstance(
+            process_id, str
+        )
+        if on_output is not None and not tracks_streamed_output:
+            raise ValueError(
+                "command/exec on_output requires stream_stdout_stderr=True and a process_id"
+            )
+
+        active_exec: _ActiveCommandExec | None = None
+        if tracks_streamed_output:
+            assert isinstance(process_id, str)
+            active_exec = _ActiveCommandExec(
+                process_id=process_id,
+                on_output=on_output,
+            )
+            self._active_command_execs[process_id] = active_exec
+
+        try:
+            response = await self._request(
+                "command/exec",
+                params,
+                timeout_s=max(self._request_timeout_s, self._turn_timeout_s),
+            )
+            result = self._extract_command_exec_result(response)
+            if active_exec is None:
+                return result
+            return CodexCommandExecResult(
+                exit_code=result.exit_code,
+                stdout=result.stdout or active_exec.buffered_stdout(),
+                stderr=result.stderr or active_exec.buffered_stderr(),
+            )
+        finally:
+            if active_exec is not None:
+                self._active_command_execs.pop(active_exec.process_id, None)
+
+    async def terminate_command_exec(self, process_id: str) -> None:
+        await self._request(
+            "command/exec/terminate",
+            self._build_command_exec_terminate_params(process_id),
+        )
 
     @staticmethod
     def _extract_command_exec_result(response: Any) -> CodexCommandExecResult:
@@ -792,6 +870,18 @@ class CodexAppServerClient:
         )
 
     async def _handle_notification(self, method: str, params: dict[str, Any]) -> None:
+        if method == "command/exec/outputDelta":
+            delta = self._extract_command_exec_output_delta(params)
+            if delta is None:
+                return
+            active_exec = self._active_command_execs.get(delta.process_id)
+            if active_exec is None:
+                return
+            active_exec.append_output(delta)
+            if active_exec.on_output is not None:
+                await active_exec.on_output(delta)
+            return
+
         active = self._active_turn
         if active is None:
             return

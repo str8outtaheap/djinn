@@ -424,3 +424,153 @@ def test_build_command_exec_terminate_params():
     assert terminate == {"processId": "proc-1"}
 
 
+def test_new_command_exec_process_id_is_non_empty():
+    process_id = CodexAppServerClient.new_command_exec_process_id()
+
+    assert isinstance(process_id, str)
+    assert process_id
+
+
+def test_run_command_exec_returns_buffered_result_without_streaming():
+    client = CodexAppServerClient(codex_cmd="codex")
+    captured: list[tuple[str, dict[str, object], float | None]] = []
+
+    async def fake_start():
+        return None
+
+    async def fake_request(method, params, *, timeout_s=None):
+        captured.append((method, params, timeout_s))
+        return {"exitCode": 0, "stdout": "ok\n", "stderr": ""}
+
+    client.start = fake_start  # type: ignore[method-assign]
+    client._request = fake_request  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        client.run_command_exec(
+            spec=CodexCommandExecSpec(command=("pwd",)),
+        )
+    )
+
+    assert result == CodexCommandExecResult(exit_code=0, stdout="ok\n", stderr="")
+    assert captured == [
+        (
+            "command/exec",
+            {"command": ["pwd"]},
+            client._turn_timeout_s,
+        )
+    ]
+
+
+def test_run_command_exec_streams_output_and_merges_stream_buffers():
+    client = CodexAppServerClient(codex_cmd="codex")
+    streamed: list[tuple[str, str]] = []
+
+    async def fake_start():
+        return None
+
+    async def fake_request(method, params, *, timeout_s=None):
+        del timeout_s
+        assert method == "command/exec"
+        await client._handle_notification(
+            "command/exec/outputDelta",
+            {
+                "processId": "proc-1",
+                "stream": "stdout",
+                "deltaBase64": base64.b64encode(b"hello ").decode("ascii"),
+                "capReached": False,
+            },
+        )
+        await client._handle_notification(
+            "command/exec/outputDelta",
+            {
+                "processId": "proc-1",
+                "stream": "stdout",
+                "deltaBase64": base64.b64encode(b"world\n").decode("ascii"),
+                "capReached": False,
+            },
+        )
+        await client._handle_notification(
+            "command/exec/outputDelta",
+            {
+                "processId": "proc-1",
+                "stream": "stderr",
+                "deltaBase64": base64.b64encode(b"warn\n").decode("ascii"),
+                "capReached": False,
+            },
+        )
+        return {"exitCode": 0, "stdout": "", "stderr": ""}
+
+    client.start = fake_start  # type: ignore[method-assign]
+    client._request = fake_request  # type: ignore[method-assign]
+
+    async def on_output(delta):
+        streamed.append((delta.stream, delta.text))
+
+    result = asyncio.run(
+        client.run_command_exec(
+            spec=CodexCommandExecSpec(
+                command=("bash", "-lc", "printf hello"),
+                process_id="proc-1",
+                stream_stdout_stderr=True,
+            ),
+            on_output=on_output,
+        )
+    )
+
+    assert streamed == [
+        ("stdout", "hello "),
+        ("stdout", "world\n"),
+        ("stderr", "warn\n"),
+    ]
+    assert result == CodexCommandExecResult(
+        exit_code=0,
+        stdout="hello world\n",
+        stderr="warn\n",
+    )
+
+
+def test_run_command_exec_requires_streaming_when_on_output_is_set():
+    client = CodexAppServerClient(codex_cmd="codex")
+
+    async def fake_start():
+        return None
+
+    client.start = fake_start  # type: ignore[method-assign]
+
+    async def on_output(_delta):
+        return None
+
+    with pytest.raises(ValueError, match="on_output requires"):
+        asyncio.run(
+            client.run_command_exec(
+                spec=CodexCommandExecSpec(
+                    command=("pwd",),
+                    process_id="proc-1",
+                ),
+                on_output=on_output,
+            )
+        )
+
+
+def test_terminate_command_exec_calls_expected_rpc_request():
+    client = CodexAppServerClient(codex_cmd="codex")
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method, params, *, timeout_s=None):
+        del timeout_s
+        captured.append((method, params))
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    async def run_case():
+        await client.terminate_command_exec("proc-1")
+
+    asyncio.run(run_case())
+
+    assert captured == [
+        (
+            "command/exec/terminate",
+            {"processId": "proc-1"},
+        ),
+    ]
