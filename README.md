@@ -49,7 +49,7 @@ network_access = true
 - `/help`: show command help
 - `/cancel`: cancel the active turn or `/run` command
 - `/cd <path>`: change working directory (supports relative paths)
-- `/status`: show thread state and working directory
+- `/status`: show current workdir and session state
 - `/sessions`: list the newest session per workdir
 - `/sessions here`: list recent sessions for the current workdir
 - `/sessions use <n|thread_id>`: switch to a listed session or explicit thread id
