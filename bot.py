@@ -88,10 +88,6 @@ def main() -> None:
     if saved_thread:
         bot_state.thread_id = saved_thread
 
-    saved_pin = runtime_state.get("pin")
-    if saved_pin:
-        bot_state.pin = saved_pin
-
     saved_active_project = runtime_state.get("active_project")
     if saved_active_project:
         project = bot_state.project_map.get(saved_active_project)
@@ -110,7 +106,6 @@ def main() -> None:
             bot_state.active_project = saved_active_project
             bot_state.workdir = project.path
             bot_state.thread_id = project.thread_id
-            bot_state.pin = project.pin
 
     application = (
         ApplicationBuilder()
@@ -130,8 +125,6 @@ def main() -> None:
     application.add_handler(CommandHandler("status", commands.status_cmd))
     application.add_handler(CommandHandler("sessions", commands.sessions_cmd))
     application.add_handler(CommandHandler("proj", commands.proj_cmd))
-    application.add_handler(CommandHandler("pin", commands.pin_cmd))
-    application.add_handler(CommandHandler("unpin", commands.unpin_cmd))
     application.add_handler(CommandHandler("run", commands.run_cmd))
     application.add_handler(CallbackQueryHandler(commands.sessions_callback, pattern=r"^sessions:"))
     application.add_handler(

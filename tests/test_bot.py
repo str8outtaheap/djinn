@@ -87,13 +87,12 @@ def test_load_projects_migrates_legacy_format(tmp_path, monkeypatch):
     assert "api" in projects
     assert projects["api"].path == str(project_dir)
     assert projects["api"].thread_id is None
-    assert projects["api"].pin is None
 
     payload = json.loads(projects_path.read_text(encoding="utf-8"))
-    assert payload["api"] == {"path": str(project_dir), "thread_id": None, "pin": None}
+    assert payload["api"] == {"path": str(project_dir), "thread_id": None}
 
 
-def test_restore_project_state_restores_workdir_thread_and_pin(tmp_path):
+def test_restore_project_state_restores_workdir_and_thread(tmp_path):
     project_dir = tmp_path / "api"
     project_dir.mkdir()
     state = bot.BotState(
@@ -102,7 +101,6 @@ def test_restore_project_state_restores_workdir_thread_and_pin(tmp_path):
             "api": bot.ProjectState(
                 path=str(project_dir),
                 thread_id="thread-123",
-                pin="keep tests green",
             )
         },
     )
@@ -113,14 +111,12 @@ def test_restore_project_state_restores_workdir_thread_and_pin(tmp_path):
     assert state.active_project == "api"
     assert state.workdir == str(project_dir)
     assert state.thread_id == "thread-123"
-    assert state.pin == "keep tests green"
 
 
 def test_sync_active_project_state_updates_project_entry():
     state = bot.BotState(
         workdir="/tmp/new-path",
         thread_id="thread-999",
-        pin="ctx",
         active_project="api",
         project_map={"api": bot.ProjectState(path="/tmp/old-path")},
     )
@@ -130,7 +126,6 @@ def test_sync_active_project_state_updates_project_entry():
     project = state.project_map["api"]
     assert project.path == "/tmp/new-path"
     assert project.thread_id == "thread-999"
-    assert project.pin == "ctx"
 
 
 def test_project_switch_round_trip_preserves_each_context(tmp_path):
@@ -144,40 +139,33 @@ def test_project_switch_round_trip_preserves_each_context(tmp_path):
     state = bot.BotState(
         workdir=str(project_a),
         thread_id="thread-a0",
-        pin="pin-a0",
         active_project="api",
         project_map={
             "api": bot.ProjectState(
                 path=str(project_a),
                 thread_id="thread-a0",
-                pin="pin-a0",
             ),
             "web": bot.ProjectState(
                 path=str(project_b),
                 thread_id="thread-b0",
-                pin="pin-b0",
             ),
         },
     )
 
     state.workdir = str(project_a_subdir)
     state.thread_id = "thread-a1"
-    state.pin = "pin-a1"
     bot.sync_active_project_state(state)
 
     assert bot.restore_project_state(state, "web")
     state.thread_id = "thread-b1"
-    state.pin = "pin-b1"
     bot.sync_active_project_state(state)
 
     assert bot.restore_project_state(state, "api")
     assert state.active_project == "api"
     assert state.workdir == str(project_a_subdir)
     assert state.thread_id == "thread-a1"
-    assert state.pin == "pin-a1"
 
     assert state.project_map["web"].thread_id == "thread-b1"
-    assert state.project_map["web"].pin == "pin-b1"
 
 
 def test_persist_state_saves_active_project_runtime(tmp_path, monkeypatch):
@@ -189,13 +177,11 @@ def test_persist_state_saves_active_project_runtime(tmp_path, monkeypatch):
     state = bot.BotState(
         workdir=str(project_dir),
         thread_id="thread-abc",
-        pin="pin",
         active_project="api",
         project_map={
             "api": bot.ProjectState(
                 path=str(project_dir),
                 thread_id="thread-abc",
-                pin="pin",
             )
         },
     )
@@ -204,19 +190,12 @@ def test_persist_state_saves_active_project_runtime(tmp_path, monkeypatch):
     loaded = bot.load_runtime_state()
     assert loaded["workdir"] == str(project_dir)
     assert loaded["thread_id"] == "thread-abc"
-    assert loaded["pin"] == "pin"
     assert loaded["active_project"] == "api"
 
 
-def test_build_prompt_without_pin_returns_user_text():
-    text = bot.build_prompt("fix the test", pin=None)
+def test_build_prompt_returns_user_text():
+    text = bot.build_prompt("fix the test")
     assert text == "fix the test"
-
-
-def test_build_prompt_with_pin_includes_context():
-    text = bot.build_prompt("fix the test", pin="project: api gateway")
-    assert "Pinned context: project: api gateway" in text
-    assert text.endswith("User: fix the test")
 
 
 def test_build_help_text_locks_lean_command_surface():
@@ -343,7 +322,7 @@ def test_render_progress_limits_actions(monkeypatch):
         )
         bot.note_progress_event(progress, event)
 
-    text = bot.render_progress(progress, label="working", pin=None)
+    text = bot.render_progress(progress, label="working")
     assert "cmd-0" not in text
     assert "cmd-1" not in text
     assert "cmd-2" in text

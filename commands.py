@@ -465,10 +465,8 @@ async def terminate_command_exec_task(
         pass
 
 
-def render_progress(progress: ProgressState, *, label: str, pin: str | None = None) -> str:
+def render_progress(progress: ProgressState, *, label: str) -> str:
     lines: list[str] = [f"{label} {format_elapsed(time.monotonic() - progress.started_at)}"]
-    if pin:
-        lines.append(f"pin: {pin}")
 
     body = list(progress.actions.values())
     if PROGRESS_MAX_ACTIONS > 0:
@@ -628,10 +626,8 @@ def join_command_args(args: Sequence[object] | None) -> str:
     return " ".join(str(part) for part in args).strip()
 
 
-def build_prompt(user_text: str, pin: str | None = None) -> str:
-    if not pin:
-        return user_text
-    return f"Pinned context: {pin}\n\nUser: {user_text}"
+def build_prompt(user_text: str) -> str:
+    return user_text
 
 
 async def get_codex_client(state: BotState) -> CodexAppServerClient:
@@ -663,7 +659,7 @@ async def progress_loop(
         now = time.monotonic()
         if not force and now - last_edit_at < PROGRESS_EDIT_MIN_INTERVAL_S:
             return
-        rendered = render_progress(progress, label=label, pin=state.pin)
+        rendered = render_progress(progress, label=label)
         if rendered == last_rendered:
             return
         await edit_message(
@@ -890,7 +886,6 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"- project: {state.active_project or 'none'}",
         f"- workdir: {state.workdir}",
         f"- thread: {state.thread_id or 'none'}",
-        f"- pin: {state.pin or '(empty)'}",
     ]
 
     await update.message.reply_text("\n".join(lines))
@@ -1008,11 +1003,10 @@ async def proj_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if removed_active:
                 state.active_project = None
                 state.thread_id = None
-                state.pin = None
             persist_state(state)
             if removed_active:
                 await update.message.reply_text(
-                    f"removed: {name}\nactive project cleared; thread and pin reset."
+                    f"removed: {name}\nactive project cleared; thread reset."
                 )
                 return
             await update.message.reply_text(f"removed: {name}")
@@ -1055,44 +1049,13 @@ async def proj_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     project = ProjectState(
         path=path,
         thread_id=existing.thread_id if existing else None,
-        pin=existing.pin if existing else None,
     )
     state.project_map[name] = project
     state.active_project = name
     state.workdir = path
     state.thread_id = project.thread_id
-    state.pin = project.pin
     persist_state(state)
     await update.message.reply_text(state.workdir)
-
-
-async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_authorized(update):
-        return
-    if update.message is None:
-        return
-
-    state: BotState = context.application.bot_data["state"]
-    text = join_command_args(context.args)
-    if not text:
-        await update.message.reply_text(f"pin: {state.pin or '(empty)'}")
-        return
-
-    state.pin = shorten(text, 120)
-    persist_state(state)
-    await update.message.reply_text(f"pin set: {state.pin}")
-
-
-async def unpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_authorized(update):
-        return
-    if update.message is None:
-        return
-
-    state: BotState = context.application.bot_data["state"]
-    state.pin = None
-    persist_state(state)
-    await update.message.reply_text("pin cleared.")
 
 
 async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1368,7 +1331,7 @@ async def run_turn_for_input(
     reply_to_message_id: int | None,
     user_text: str,
 ) -> None:
-    prompt = build_prompt(user_text, state.pin)
+    prompt = build_prompt(user_text)
 
     try:
         client = await get_codex_client(state)
@@ -1384,7 +1347,7 @@ async def run_turn_for_input(
         return
 
     progress = ProgressState(started_at=time.monotonic())
-    progress_text = render_progress(progress, label="working", pin=state.pin)
+    progress_text = render_progress(progress, label="working")
     progress_message_id = None
 
     try:

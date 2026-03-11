@@ -31,7 +31,6 @@ class ProgressState:
 class ProjectState:
     path: str
     thread_id: str | None = None
-    pin: str | None = None
 
 
 @dataclass
@@ -40,7 +39,6 @@ class BotState:
     thread_id: str | None = None
     project_map: dict[str, ProjectState] = field(default_factory=dict)
     active_project: str | None = None
-    pin: str | None = None
     run_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active_command_exec_id: str | None = None
     command_cancel_requested: bool = False
@@ -93,10 +91,6 @@ def load_runtime_state() -> dict[str, str]:
     if isinstance(thread_id, str) and thread_id:
         state["thread_id"] = thread_id
 
-    pin = payload.get("pin")
-    if isinstance(pin, str) and pin:
-        state["pin"] = pin
-
     active_project = payload.get("active_project")
     if isinstance(active_project, str) and active_project:
         state["active_project"] = active_project
@@ -110,8 +104,6 @@ def save_runtime_state(state: BotState) -> None:
     }
     if state.thread_id:
         payload["thread_id"] = state.thread_id
-    if state.pin:
-        payload["pin"] = state.pin
     if state.active_project:
         payload["active_project"] = state.active_project
     _save_json_dict(STATE_PATH, payload)
@@ -121,11 +113,9 @@ def _coerce_project_state(raw: Any) -> ProjectState | None:
     if isinstance(raw, str):
         path = raw
         thread_id = None
-        pin = None
     elif isinstance(raw, dict):
         path = raw.get("path")
         thread_id = raw.get("thread_id")
-        pin = raw.get("pin")
     else:
         return None
 
@@ -135,10 +125,7 @@ def _coerce_project_state(raw: Any) -> ProjectState | None:
     if not isinstance(thread_id, str) or not thread_id:
         thread_id = None
 
-    if not isinstance(pin, str) or not pin:
-        pin = None
-
-    return ProjectState(path=path, thread_id=thread_id, pin=pin)
+    return ProjectState(path=path, thread_id=thread_id)
 
 
 def load_projects() -> dict[str, ProjectState]:
@@ -171,7 +158,6 @@ def save_projects(projects: dict[str, ProjectState]) -> None:
         payload[name] = {
             "path": project.path,
             "thread_id": project.thread_id,
-            "pin": project.pin,
         }
     _save_json_dict(PROJECTS_PATH, payload)
 
@@ -184,7 +170,6 @@ def sync_active_project_state(state: BotState) -> None:
         return
     project.path = state.workdir
     project.thread_id = state.thread_id
-    project.pin = state.pin
 
 
 def persist_state(state: BotState) -> None:
@@ -203,5 +188,4 @@ def restore_project_state(state: BotState, name: str) -> bool:
     state.active_project = name
     state.workdir = project.path
     state.thread_id = project.thread_id
-    state.pin = project.pin
     return True
