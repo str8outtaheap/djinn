@@ -104,7 +104,6 @@ def test_build_help_text_locks_lean_command_surface():
         "/cancel",
         "/status",
         "/sessions",
-        "/sessions here",
         "/sessions use <n|thread_id>",
         "/run <command>",
         "/cd <path>",
@@ -578,11 +577,10 @@ def test_format_sessions_text_marks_current_thread():
     ]
     text = bot.format_sessions_text(
         sessions,
-        scope_all=False,
-        workdir="/tmp/work",
         current_thread_id="thread-two",
     )
-    assert "Recent sessions (/tmp/work):" in text
+    assert "Recent sessions (all workdirs):" in text
+    assert "Showing newest session per workdir." in text
     assert "(current)" in text
     assert "/sessions use <n>" in text
 
@@ -641,51 +639,18 @@ def test_sessions_cmd_lists_newest_session_per_workdir_by_default(monkeypatch):
     assert sent["reply_markup"] is not None
 
 
-def test_sessions_cmd_here_lists_current_workdir_history(monkeypatch):
+def test_sessions_cmd_rejects_removed_here_mode(monkeypatch):
     monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
     monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
 
     state = bot.BotState(workdir="/tmp/work")
     context = _context_with_state(state)
     context.args = ["here"]
-    message, _ = _message(text="/sessions here", message_id=93)
+    message, replies = _message(text="/sessions here", message_id=93)
     update = _update_with_message(chat_id=123, user_id=7, message=message)
-
-    called: dict[str, Any] = {}
-    sent: dict[str, Any] = {}
-
-    class FakeClient:
-        async def list_threads(self, **kwargs):
-            called.update(kwargs)
-            return CodexThreadListResult(
-                threads=[
-                    CodexThreadSummary(thread_id="thread-1", cwd="/tmp/work", source="cli"),
-                    CodexThreadSummary(thread_id="thread-2", cwd="/tmp/work", source="vscode"),
-                ],
-                next_cursor="cursor-1",
-            )
-
-    async def fake_get_codex_client(_state: bot.BotState):
-        return FakeClient()
-
-    async def fake_send_message(_application, text: str, **kwargs):
-        sent["text"] = text
-        sent["reply_markup"] = kwargs.get("reply_markup")
-        return 1
-
-    monkeypatch.setattr(commands, "get_codex_client", fake_get_codex_client)
-    monkeypatch.setattr(commands, "send_message", fake_send_message)
     asyncio.run(bot.sessions_cmd(update, context))
 
-    assert called == {
-        "limit": bot.SESSIONS_LIST_LIMIT,
-        "cwd": "/tmp/work",
-        "sort_key": "updated_at",
-    }
-    assert state.last_session_ids == ["thread-1", "thread-2"]
-    assert "Recent sessions (/tmp/work):" in sent["text"]
-    assert "Use `/sessions` to browse newest sessions across workdirs." in sent["text"]
-    assert sent["reply_markup"] is not None
+    assert replies == ["Usage: /sessions | /sessions use <n|thread_id>"]
 
 
 def test_sessions_cmd_use_index_updates_thread(monkeypatch):

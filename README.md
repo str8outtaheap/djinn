@@ -8,7 +8,7 @@ Telegram bot bridge for the [Codex CLI](https://developers.openai.com/codex/cli)
 - Live progress updates from structured item lifecycle events (`started`, `delta`, `completed`)
 - App-server-backed `/run` with live stdout/stderr tail updates
 - Startup health ping ("Djinn online") to the authorized chat
-- Session browser and quick resume (`/sessions`, `/sessions here`, `/sessions use`)
+- Session browser and quick resume (`/sessions`, `/sessions use`)
 - `/cd`, `/status`, `/reset`, `/run`
 - Optional voice note transcription via OpenAI SDK
 
@@ -51,7 +51,6 @@ network_access = true
 - `/cd <path>`: change working directory (supports relative paths)
 - `/status`: show current workdir and session state
 - `/sessions`: list the newest session per workdir
-- `/sessions here`: list recent sessions for the current workdir
 - `/sessions use <n|thread_id>`: switch to a listed session or explicit thread id
 - `/run <command>`: run a command in the current working directory with live output updates, timeout protection, and capped final output
 

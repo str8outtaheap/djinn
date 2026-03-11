@@ -343,16 +343,9 @@ def latest_sessions_by_workdir(
 def format_sessions_text(
     sessions: Sequence[CodexThreadSummary],
     *,
-    scope_all: bool,
-    workdir: str,
     current_thread_id: str | None,
-    next_cursor: str | None = None,
-    latest_per_workdir: bool = False,
 ) -> str:
-    heading = "Recent sessions (all workdirs):" if scope_all else f"Recent sessions ({workdir}):"
-    lines = [heading]
-    if latest_per_workdir:
-        lines.append("Showing newest session per workdir.")
+    lines = ["Recent sessions (all workdirs):", "Showing newest session per workdir."]
     if not sessions:
         lines.append("(none found)")
     else:
@@ -368,12 +361,6 @@ def format_sessions_text(
 
     lines.append("")
     lines.append("Use `/sessions use <n>` or `/sessions use <thread_id>` to switch.")
-    if not scope_all:
-        lines.append("Use `/sessions` to browse newest sessions across workdirs.")
-    else:
-        lines.append("Use `/sessions here` to list more sessions for the current workdir.")
-    if next_cursor and not latest_per_workdir:
-        lines.append("More sessions exist; run `/sessions here` again to continue browsing.")
     return "\n".join(lines)
 
 
@@ -421,7 +408,6 @@ def build_help_text() -> str:
         "/cancel - stop the active run/turn",
         "/status - show current workdir and session state",
         "/sessions - list newest session per workdir",
-        "/sessions here - list recent sessions for this workdir",
         "/sessions use <n|thread_id> - switch current session",
         "/run <command> - run a command in current workdir",
         "/cd <path> - change workdir",
@@ -908,44 +894,21 @@ async def sessions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Session set: {state.thread_id}")
         return
 
-    scope_all = True
     if args:
-        if args[0] == "here":
-            scope_all = False
-        elif args[0] != "all":
-            await update.message.reply_text(
-                "Usage: /sessions | /sessions here | /sessions use <n|thread_id>"
-            )
-            return
-        if len(args) > 1:
-            await update.message.reply_text(
-                "Usage: /sessions | /sessions here | /sessions use <n|thread_id>"
-            )
-            return
+        await update.message.reply_text("Usage: /sessions | /sessions use <n|thread_id>")
+        return
 
     try:
         client = await get_codex_client(state)
-        if scope_all:
-            listing = await client.list_threads(
-                limit=SESSIONS_FETCH_LIMIT,
-                cwd=None,
-                sort_key="updated_at",
-            )
-            sessions = latest_sessions_by_workdir(
-                listing.threads,
-                max_sessions=SESSIONS_LIST_LIMIT,
-            )
-            next_cursor = listing.next_cursor
-            latest_per_workdir = True
-        else:
-            listing = await client.list_threads(
-                limit=SESSIONS_LIST_LIMIT,
-                cwd=state.workdir,
-                sort_key="updated_at",
-            )
-            sessions = list(listing.threads)
-            next_cursor = listing.next_cursor
-            latest_per_workdir = False
+        listing = await client.list_threads(
+            limit=SESSIONS_FETCH_LIMIT,
+            cwd=None,
+            sort_key="updated_at",
+        )
+        sessions = latest_sessions_by_workdir(
+            listing.threads,
+            max_sessions=SESSIONS_LIST_LIMIT,
+        )
     except Exception as exc:
         LOGGER.warning("failed to list sessions: %s", exc)
         await update.message.reply_text(f"Failed to list sessions: {exc}")
@@ -956,11 +919,7 @@ async def sessions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.application,
         format_sessions_text(
             sessions,
-            scope_all=scope_all,
-            workdir=state.workdir,
             current_thread_id=state.thread_id,
-            next_cursor=next_cursor,
-            latest_per_workdir=latest_per_workdir,
         ),
         chat_id=int(update.effective_chat.id),
         reply_to_message_id=update.message.message_id,
