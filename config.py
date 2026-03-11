@@ -60,7 +60,6 @@ SESSIONS_BUTTON_LIMIT = 6
 
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".djinn")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
-PROJECTS_PATH = os.path.join(STATE_DIR, "projects.json")
 
 SYSTEM_HINT = (
     "You are Djinn, a Telegram bridge running through Codex App Server. "

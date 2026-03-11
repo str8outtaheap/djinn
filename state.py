@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from codex import CodexAppServerClient
-from config import DEFAULT_WORKDIR, PROJECTS_PATH, STATE_PATH
+from config import DEFAULT_WORKDIR, STATE_PATH
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,17 +28,9 @@ class ProgressState:
 
 
 @dataclass
-class ProjectState:
-    path: str
-    thread_id: str | None = None
-
-
-@dataclass
 class BotState:
     workdir: str = DEFAULT_WORKDIR
     thread_id: str | None = None
-    project_map: dict[str, ProjectState] = field(default_factory=dict)
-    active_project: str | None = None
     run_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active_command_exec_id: str | None = None
     command_cancel_requested: bool = False
@@ -91,10 +83,6 @@ def load_runtime_state() -> dict[str, str]:
     if isinstance(thread_id, str) and thread_id:
         state["thread_id"] = thread_id
 
-    active_project = payload.get("active_project")
-    if isinstance(active_project, str) and active_project:
-        state["active_project"] = active_project
-
     return state
 
 
@@ -104,88 +92,8 @@ def save_runtime_state(state: BotState) -> None:
     }
     if state.thread_id:
         payload["thread_id"] = state.thread_id
-    if state.active_project:
-        payload["active_project"] = state.active_project
     _save_json_dict(STATE_PATH, payload)
 
 
-def _coerce_project_state(raw: Any) -> ProjectState | None:
-    if isinstance(raw, str):
-        path = raw
-        thread_id = None
-    elif isinstance(raw, dict):
-        path = raw.get("path")
-        thread_id = raw.get("thread_id")
-    else:
-        return None
-
-    if not isinstance(path, str) or not path:
-        return None
-
-    if not isinstance(thread_id, str) or not thread_id:
-        thread_id = None
-
-    return ProjectState(path=path, thread_id=thread_id)
-
-
-def load_projects() -> dict[str, ProjectState]:
-    raw = _load_json_dict(PROJECTS_PATH)
-    projects: dict[str, ProjectState] = {}
-    migrated = False
-
-    for name, payload in raw.items():
-        if not isinstance(name, str) or not name:
-            continue
-        project = _coerce_project_state(payload)
-        if project is None:
-            continue
-        if not os.path.isdir(project.path):
-            LOGGER.warning("ignoring missing project path for %s: %s", name, project.path)
-            continue
-        projects[name] = project
-        if not isinstance(payload, dict):
-            migrated = True
-
-    if migrated:
-        save_projects(projects)
-
-    return projects
-
-
-def save_projects(projects: dict[str, ProjectState]) -> None:
-    payload: dict[str, dict[str, Any]] = {}
-    for name, project in projects.items():
-        payload[name] = {
-            "path": project.path,
-            "thread_id": project.thread_id,
-        }
-    _save_json_dict(PROJECTS_PATH, payload)
-
-
-def sync_active_project_state(state: BotState) -> None:
-    if not state.active_project:
-        return
-    project = state.project_map.get(state.active_project)
-    if project is None:
-        return
-    project.path = state.workdir
-    project.thread_id = state.thread_id
-
-
 def persist_state(state: BotState) -> None:
-    sync_active_project_state(state)
     save_runtime_state(state)
-    save_projects(state.project_map)
-
-
-def restore_project_state(state: BotState, name: str) -> bool:
-    project = state.project_map.get(name)
-    if project is None:
-        return False
-    if not os.path.isdir(project.path):
-        return False
-
-    state.active_project = name
-    state.workdir = project.path
-    state.thread_id = project.thread_id
-    return True

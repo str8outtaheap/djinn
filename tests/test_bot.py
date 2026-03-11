@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -75,122 +74,20 @@ def test_resolve_workdir_absolute(tmp_path):
     assert resolved == absolute
 
 
-def test_load_projects_migrates_legacy_format(tmp_path, monkeypatch):
-    project_dir = tmp_path / "api"
-    project_dir.mkdir()
-    projects_path = tmp_path / "projects.json"
-    projects_path.write_text(json.dumps({"api": str(project_dir)}), encoding="utf-8")
-    monkeypatch.setattr(bot_state, "PROJECTS_PATH", str(projects_path))
-
-    projects = bot.load_projects()
-
-    assert "api" in projects
-    assert projects["api"].path == str(project_dir)
-    assert projects["api"].thread_id is None
-
-    payload = json.loads(projects_path.read_text(encoding="utf-8"))
-    assert payload["api"] == {"path": str(project_dir), "thread_id": None}
-
-
-def test_restore_project_state_restores_workdir_and_thread(tmp_path):
-    project_dir = tmp_path / "api"
-    project_dir.mkdir()
-    state = bot.BotState(
-        workdir=str(tmp_path),
-        project_map={
-            "api": bot.ProjectState(
-                path=str(project_dir),
-                thread_id="thread-123",
-            )
-        },
-    )
-
-    ok = bot.restore_project_state(state, "api")
-
-    assert ok is True
-    assert state.active_project == "api"
-    assert state.workdir == str(project_dir)
-    assert state.thread_id == "thread-123"
-
-
-def test_sync_active_project_state_updates_project_entry():
-    state = bot.BotState(
-        workdir="/tmp/new-path",
-        thread_id="thread-999",
-        active_project="api",
-        project_map={"api": bot.ProjectState(path="/tmp/old-path")},
-    )
-
-    bot.sync_active_project_state(state)
-
-    project = state.project_map["api"]
-    assert project.path == "/tmp/new-path"
-    assert project.thread_id == "thread-999"
-
-
-def test_project_switch_round_trip_preserves_each_context(tmp_path):
-    project_a = tmp_path / "api"
-    project_b = tmp_path / "web"
-    project_a.mkdir()
-    project_b.mkdir()
-    project_a_subdir = project_a / "services"
-    project_a_subdir.mkdir()
-
-    state = bot.BotState(
-        workdir=str(project_a),
-        thread_id="thread-a0",
-        active_project="api",
-        project_map={
-            "api": bot.ProjectState(
-                path=str(project_a),
-                thread_id="thread-a0",
-            ),
-            "web": bot.ProjectState(
-                path=str(project_b),
-                thread_id="thread-b0",
-            ),
-        },
-    )
-
-    state.workdir = str(project_a_subdir)
-    state.thread_id = "thread-a1"
-    bot.sync_active_project_state(state)
-
-    assert bot.restore_project_state(state, "web")
-    state.thread_id = "thread-b1"
-    bot.sync_active_project_state(state)
-
-    assert bot.restore_project_state(state, "api")
-    assert state.active_project == "api"
-    assert state.workdir == str(project_a_subdir)
-    assert state.thread_id == "thread-a1"
-
-    assert state.project_map["web"].thread_id == "thread-b1"
-
-
-def test_persist_state_saves_active_project_runtime(tmp_path, monkeypatch):
+def test_persist_state_saves_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_state, "STATE_PATH", str(tmp_path / "state.json"))
-    monkeypatch.setattr(bot_state, "PROJECTS_PATH", str(tmp_path / "projects.json"))
-    project_dir = tmp_path / "api"
-    project_dir.mkdir()
+    workdir = tmp_path / "workspace"
+    workdir.mkdir()
 
     state = bot.BotState(
-        workdir=str(project_dir),
+        workdir=str(workdir),
         thread_id="thread-abc",
-        active_project="api",
-        project_map={
-            "api": bot.ProjectState(
-                path=str(project_dir),
-                thread_id="thread-abc",
-            )
-        },
     )
     bot.persist_state(state)
 
     loaded = bot.load_runtime_state()
-    assert loaded["workdir"] == str(project_dir)
+    assert loaded["workdir"] == str(workdir)
     assert loaded["thread_id"] == "thread-abc"
-    assert loaded["active_project"] == "api"
 
 
 def test_build_prompt_returns_user_text():
@@ -633,7 +530,7 @@ def test_drain_queued_turns_processes_new_items_until_empty(monkeypatch):
 
 def test_startup_notify_sends_online_message(monkeypatch):
     monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
-    state = bot.BotState(workdir="/tmp/project", active_project="api")
+    state = bot.BotState(workdir="/tmp/project")
     app = SimpleNamespace(bot_data={"state": state})
     sent: dict[str, Any] = {}
 
@@ -647,7 +544,7 @@ def test_startup_notify_sends_online_message(monkeypatch):
 
     assert sent["chat_id"] == 123
     assert "Djinn online." in sent["text"]
-    assert "project: api" in sent["text"]
+    assert "workdir: /tmp/project" in sent["text"]
 
 
 def test_resolve_session_selection_by_index():

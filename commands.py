@@ -48,11 +48,8 @@ from config import (
 from state import (
     BotState,
     ProgressState,
-    ProjectState,
     QueuedTurn,
     persist_state,
-    restore_project_state,
-    sync_active_project_state,
 )
 from telegram_utils import delete_message, edit_message, send_message
 
@@ -883,7 +880,6 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     state: BotState = context.application.bot_data["state"]
     lines = [
         "Status:",
-        f"- project: {state.active_project or 'none'}",
         f"- workdir: {state.workdir}",
         f"- thread: {state.thread_id or 'none'}",
     ]
@@ -970,92 +966,6 @@ async def sessions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_to_message_id=update.message.message_id,
         reply_markup=_sessions_keyboard(sessions),
     )
-
-
-async def proj_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_authorized(update):
-        return
-    if update.message is None:
-        return
-
-    state: BotState = context.application.bot_data["state"]
-    args = context.args
-
-    if not args:
-        if not state.project_map:
-            await update.message.reply_text("projects: (empty)")
-            return
-        items: list[str] = []
-        for name, project in sorted(state.project_map.items()):
-            label = f"{name} (active)" if name == state.active_project else name
-            items.append(f"{label} -> {project.path}")
-        await update.message.reply_text("projects:\n" + "\n".join(items))
-        return
-
-    if args[0] == "rm":
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /proj rm <name>")
-            return
-        name = args[1]
-        if name in state.project_map:
-            state.project_map.pop(name, None)
-            removed_active = state.active_project == name
-            if removed_active:
-                state.active_project = None
-                state.thread_id = None
-            persist_state(state)
-            if removed_active:
-                await update.message.reply_text(
-                    f"removed: {name}\nactive project cleared; thread reset."
-                )
-                return
-            await update.message.reply_text(f"removed: {name}")
-            return
-        await update.message.reply_text(f"no such project: {name}")
-        return
-
-    name = args[0]
-    if len(args) == 1:
-        if name not in state.project_map:
-            await update.message.reply_text(f"no such project: {name}")
-            return
-        sync_active_project_state(state)
-        if not restore_project_state(state, name):
-            project = state.project_map[name]
-            LOGGER.warning(
-                "project %s has missing directory during switch: %s",
-                name,
-                project.path,
-            )
-            persist_state(state)
-            await update.message.reply_text(f"missing directory: {project.path}")
-            return
-        persist_state(state)
-        await update.message.reply_text(state.workdir)
-        return
-
-    raw_path = " ".join(args[1:]).strip()
-    if not raw_path:
-        await update.message.reply_text("Usage: /proj <name> <path>")
-        return
-
-    path = resolve_workdir(raw_path, state.workdir)
-    if not path or not os.path.isdir(path):
-        await update.message.reply_text(f"No such directory: {path or raw_path}")
-        return
-
-    sync_active_project_state(state)
-    existing = state.project_map.get(name)
-    project = ProjectState(
-        path=path,
-        thread_id=existing.thread_id if existing else None,
-    )
-    state.project_map[name] = project
-    state.active_project = name
-    state.workdir = path
-    state.thread_id = project.thread_id
-    persist_state(state)
-    await update.message.reply_text(state.workdir)
 
 
 async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1522,7 +1432,6 @@ async def startup_notify(application: Application) -> None:
     message = "\n".join(
         [
             "Djinn online.",
-            f"project: {state.active_project or 'none'}",
             f"workdir: {state.workdir}",
         ]
     )

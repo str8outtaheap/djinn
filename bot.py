@@ -18,15 +18,11 @@ import telegram_utils
 
 # Re-export for compatibility with existing tests/importers.
 BotState = state.BotState
-ProjectState = state.ProjectState
 ProgressState = state.ProgressState
 QueuedTurn = state.QueuedTurn
 
-load_projects = state.load_projects
 load_runtime_state = state.load_runtime_state
 persist_state = state.persist_state
-restore_project_state = state.restore_project_state
-sync_active_project_state = state.sync_active_project_state
 
 send_message = telegram_utils.send_message
 
@@ -53,7 +49,6 @@ get_codex_client = commands.get_codex_client
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 TELEGRAM_USER_ID = config.TELEGRAM_USER_ID
 STATE_PATH = config.STATE_PATH
-PROJECTS_PATH = config.PROJECTS_PATH
 PROGRESS_MAX_ACTIONS = config.PROGRESS_MAX_ACTIONS
 SESSIONS_FETCH_LIMIT = config.SESSIONS_FETCH_LIMIT
 SESSIONS_LIST_LIMIT = config.SESSIONS_LIST_LIMIT
@@ -76,10 +71,8 @@ def main() -> None:
         raise SystemExit("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in .env")
 
     bot_state = state.BotState()
-    bot_state.project_map = state.load_projects()
     runtime_state = state.load_runtime_state()
 
-    # Runtime state is the fallback when no active project can be restored.
     saved_workdir = runtime_state.get("workdir")
     if saved_workdir and os.path.isdir(saved_workdir):
         bot_state.workdir = saved_workdir
@@ -87,25 +80,6 @@ def main() -> None:
     saved_thread = runtime_state.get("thread_id")
     if saved_thread:
         bot_state.thread_id = saved_thread
-
-    saved_active_project = runtime_state.get("active_project")
-    if saved_active_project:
-        project = bot_state.project_map.get(saved_active_project)
-        if project is None:
-            LOGGER.warning(
-                "saved active project %s not found in project map",
-                saved_active_project,
-            )
-        elif not os.path.isdir(project.path):
-            LOGGER.warning(
-                "saved active project %s has missing directory: %s",
-                saved_active_project,
-                project.path,
-            )
-        else:
-            bot_state.active_project = saved_active_project
-            bot_state.workdir = project.path
-            bot_state.thread_id = project.thread_id
 
     application = (
         ApplicationBuilder()
@@ -124,7 +98,6 @@ def main() -> None:
     application.add_handler(CommandHandler("cd", commands.cd_cmd))
     application.add_handler(CommandHandler("status", commands.status_cmd))
     application.add_handler(CommandHandler("sessions", commands.sessions_cmd))
-    application.add_handler(CommandHandler("proj", commands.proj_cmd))
     application.add_handler(CommandHandler("run", commands.run_cmd))
     application.add_handler(CallbackQueryHandler(commands.sessions_callback, pattern=r"^sessions:"))
     application.add_handler(

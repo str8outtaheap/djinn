@@ -9,7 +9,7 @@ Telegram bot bridge for the [Codex CLI](https://developers.openai.com/codex/cli)
 - App-server-backed `/run` with live stdout/stderr tail updates
 - Startup health ping ("Djinn online") to the authorized chat
 - Session browser and quick resume (`/sessions`, `/sessions here`, `/sessions use`)
-- `/cd`, `/status`, `/reset`, `/run`, `/proj`
+- `/cd`, `/status`, `/reset`, `/run`
 - Optional voice note transcription via OpenAI SDK
 
 ## Quickstart
@@ -50,10 +50,6 @@ network_access = true
 - `/cancel`: cancel the active turn or `/run` command
 - `/cd <path>`: change working directory (supports relative paths)
 - `/status`: show thread state and working directory
-- `/proj`: list project aliases
-- `/proj <name>`: switch to a saved project context (workdir + thread)
-- `/proj <name> <path>`: save (and switch to) a project context
-- `/proj rm <name>`: remove a project alias
 - `/sessions`: list the newest session per workdir
 - `/sessions here`: list recent sessions for the current workdir
 - `/sessions use <n|thread_id>`: switch to a listed session or explicit thread id
@@ -75,7 +71,6 @@ uv run ty check .
 
 ## State Files
 - Runtime state: `~/.djinn/state.json`
-- Project contexts: `~/.djinn/projects.json` (`path`, `thread_id`)
 
 ## Security Notes
 This bot can run commands and edit files.
