@@ -378,6 +378,11 @@ def resolve_session_selection(state: BotState, token: str) -> tuple[str | None, 
     return target, None
 
 
+def set_active_session(state: BotState, thread_id: str) -> None:
+    state.thread_id = thread_id
+    persist_state(state)
+
+
 def _sessions_keyboard(sessions: Sequence[CodexThreadSummary]) -> InlineKeyboardMarkup | None:
     if not sessions:
         return None
@@ -889,8 +894,7 @@ async def sessions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(error_text)
             return
         assert thread_id is not None
-        state.thread_id = thread_id
-        persist_state(state)
+        set_active_session(state, thread_id)
         await update.message.reply_text(f"Session set: {state.thread_id}")
         return
 
@@ -1126,8 +1130,7 @@ async def sessions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     state: BotState = context.application.bot_data["state"]
-    state.thread_id = thread_id
-    persist_state(state)
+    set_active_session(state, thread_id)
 
     await query.answer("Session selected")
     try:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from telegram.ext import (
     ApplicationBuilder,
@@ -74,7 +73,7 @@ def main() -> None:
     runtime_state = state.load_runtime_state()
 
     saved_workdir = runtime_state.get("workdir")
-    if saved_workdir and os.path.isdir(saved_workdir):
+    if saved_workdir:
         bot_state.workdir = saved_workdir
 
     saved_thread = runtime_state.get("thread_id")
