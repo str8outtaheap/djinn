@@ -622,44 +622,6 @@ def test_render_run_command_result_marks_output_cap():
     assert rendered == "$ echo hello\nhello\n(app-server output capped)"
 
 
-def test_last_cmd_resends_saved_result(monkeypatch):
-    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
-    state = bot.BotState(last_turn_result="done text")
-    context = _context_with_state(state)
-    message, _ = _message(text="/last", message_id=55)
-    update = _update_with_message(chat_id=123, user_id=7, message=message)
-    sent: dict[str, Any] = {}
-
-    async def fake_send_message(_application, text: str, **kwargs):
-        sent["text"] = text
-        sent["chat_id"] = kwargs.get("chat_id")
-        sent["reply_to_message_id"] = kwargs.get("reply_to_message_id")
-        return 77
-
-    monkeypatch.setattr(commands, "send_message", fake_send_message)
-    asyncio.run(bot.last_cmd(update, context))
-
-    assert sent == {
-        "text": "done text",
-        "chat_id": 123,
-        "reply_to_message_id": 55,
-    }
-
-
-def test_last_cmd_reports_missing_result(monkeypatch):
-    monkeypatch.setattr(commands, "TELEGRAM_CHAT_ID", "123")
-    monkeypatch.setattr(commands, "TELEGRAM_USER_ID", None)
-    state = bot.BotState(last_turn_result=None)
-    context = _context_with_state(state)
-    message, replies = _message(text="/last", message_id=56)
-    update = _update_with_message(chat_id=123, user_id=7, message=message)
-
-    asyncio.run(bot.last_cmd(update, context))
-
-    assert replies == ["No turn result yet."]
-
-
 def test_drain_queued_turns_processes_new_items_until_empty(monkeypatch):
     state = bot.BotState()
     context = _context_with_state(state)

@@ -845,25 +845,6 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("No active run to cancel.")
 
 
-async def last_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_authorized(update):
-        return
-    if update.message is None or update.effective_chat is None:
-        return
-
-    state: BotState = context.application.bot_data["state"]
-    if not state.last_turn_result:
-        await update.message.reply_text("No turn result yet.")
-        return
-
-    await send_message(
-        context.application,
-        state.last_turn_result,
-        chat_id=int(update.effective_chat.id),
-        reply_to_message_id=update.message.message_id,
-    )
-
-
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update):
         return
@@ -873,15 +854,6 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state.thread_id = None
     persist_state(state)
     await update.message.reply_text("Thread reset. Next message starts a new Djinn thread.")
-
-
-async def pwd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_authorized(update):
-        return
-    if update.message is None:
-        return
-    state: BotState = context.application.bot_data["state"]
-    await update.message.reply_text(state.workdir)
 
 
 async def cd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -904,23 +876,6 @@ async def cd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(f"No such directory: {target_path or target}")
-
-
-async def thread_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_authorized(update):
-        return
-    if update.message is None:
-        return
-
-    state: BotState = context.application.bot_data["state"]
-    target = join_command_args(context.args)
-    if not target:
-        await update.message.reply_text(f"thread: {state.thread_id or 'none'}")
-        return
-
-    state.thread_id = target
-    persist_state(state)
-    await update.message.reply_text(f"thread set: {state.thread_id}")
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1420,7 +1375,6 @@ async def run_turn_for_input(
     except Exception as exc:
         LOGGER.exception("failed to start Codex app-server client: %s", exc)
         message = f"Failed to start Codex App Server: {exc}"
-        state.last_turn_result = message
         await send_message(
             context.application,
             message,
@@ -1480,7 +1434,6 @@ async def run_turn_for_input(
     except Exception as exc:
         LOGGER.exception("turn failed: %s", exc)
         message = f"Djinn failed to complete the turn: {exc}"
-        state.last_turn_result = message
         await send_message(
             context.application,
             message,
@@ -1506,14 +1459,13 @@ async def run_turn_for_input(
 
     state.thread_id = result.thread_id
     persist_state(state)
-    rendered = await send_turn_result(
+    await send_turn_result(
         context=context,
         chat_id=chat_id,
         reply_to_message_id=reply_to_message_id,
         result=result,
         changed_files_summary=format_changed_files_summary(progress),
     )
-    state.last_turn_result = rendered
 
 
 async def drain_queued_turns(context: ContextTypes.DEFAULT_TYPE, state: BotState) -> None:

@@ -47,7 +47,6 @@ run_turn_for_input = commands.run_turn_for_input
 sessions_cmd = commands.sessions_cmd
 sessions_callback = commands.sessions_callback
 on_message = commands.on_message
-last_cmd = commands.last_cmd
 startup_notify = commands.startup_notify
 get_codex_client = commands.get_codex_client
 
@@ -126,11 +125,8 @@ def main() -> None:
     application.add_handler(CommandHandler("start", commands.start_cmd))
     application.add_handler(CommandHandler("help", commands.help_cmd))
     application.add_handler(CommandHandler("cancel", commands.cancel_cmd))
-    application.add_handler(CommandHandler("last", commands.last_cmd))
     application.add_handler(CommandHandler("reset", commands.reset_cmd))
-    application.add_handler(CommandHandler("pwd", commands.pwd_cmd))
     application.add_handler(CommandHandler("cd", commands.cd_cmd))
-    application.add_handler(CommandHandler("thread", commands.thread_cmd))
     application.add_handler(CommandHandler("status", commands.status_cmd))
     application.add_handler(CommandHandler("sessions", commands.sessions_cmd))
     application.add_handler(CommandHandler("proj", commands.proj_cmd))

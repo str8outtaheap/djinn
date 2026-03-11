@@ -48,7 +48,6 @@ network_access = true
 - `/start`: confirm connectivity
 - `/help`: show command help
 - `/cancel`: cancel the active turn or `/run` command
-- `/last`: resend the latest turn result
 - `/cd <path>`: change working directory (supports relative paths)
 - `/status`: show thread state and working directory
 - `/proj`: list project aliases

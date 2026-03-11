@@ -46,7 +46,6 @@ class BotState:
     command_cancel_requested: bool = False
     queued_turn: QueuedTurn | None = None
     last_session_ids: list[str] = field(default_factory=list)
-    last_turn_result: str | None = None
     codex: CodexAppServerClient | None = None
 
 
