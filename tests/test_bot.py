@@ -219,13 +219,37 @@ def test_build_prompt_with_pin_includes_context():
     assert text.endswith("User: fix the test")
 
 
-def test_build_help_text_mentions_cancel_and_proj():
+def test_build_help_text_locks_lean_command_surface():
     text = bot.build_help_text()
-    assert "/cancel" in text
-    assert "/proj <name>" in text
-    assert "/sessions use <n|thread_id>" in text
-    assert "/approve" not in text
-    assert "/deny" not in text
+
+    kept_commands = (
+        "/start",
+        "/help",
+        "/cancel",
+        "/status",
+        "/sessions",
+        "/sessions here",
+        "/sessions use <n|thread_id>",
+        "/run <command>",
+        "/cd <path>",
+        "/reset",
+    )
+    removed_commands = (
+        "/last",
+        "/pwd",
+        "/thread",
+        "/proj",
+        "/pin",
+        "/unpin",
+        "/approve",
+        "/deny",
+    )
+
+    for command in kept_commands:
+        assert command in text
+
+    for command in removed_commands:
+        assert command not in text
 
 
 def test_truncate_output_adds_notice_when_clipped():
